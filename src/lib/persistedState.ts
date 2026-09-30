@@ -20,6 +20,7 @@ export interface PersistedAppState {
   activeAgentConversationId: string | null
   agentInputDrafts: Record<string, AgentInputDraft>
   agentSidebarCollapsed: boolean
+  agentSidebarLayoutVersion?: number
   agentAssetTab: 'references' | 'outputs'
   agentAssetPanelCollapsed: boolean
   favoriteCollections: FavoriteCollection[]
@@ -115,6 +116,7 @@ export function createPersistedState(state: PersistedStateSource, includeLegacyA
     activeAgentConversationId: state.activeAgentConversationId,
     agentInputDrafts: settings.persistInputOnRestart ? getPersistableAgentInputDrafts(state) : {},
     agentSidebarCollapsed: state.agentSidebarCollapsed,
+    agentSidebarLayoutVersion: 1,
     agentAssetTab: state.agentAssetTab,
     agentAssetPanelCollapsed: state.agentAssetPanelCollapsed,
     favoriteCollections: state.favoriteCollections,
@@ -210,7 +212,9 @@ export function normalizePersistedState(
       agentConversations,
       activeAgentConversationId,
       agentInputDrafts,
-      agentSidebarCollapsed: Boolean(persistedState.agentSidebarCollapsed),
+      // 旧标志表示自动关闭手机抽屉，新布局首次升级应展开桌面侧栏。
+      agentSidebarCollapsed: persistedState.agentSidebarLayoutVersion === 1 ? Boolean(persistedState.agentSidebarCollapsed) : false,
+      agentSidebarLayoutVersion: 1,
       agentAssetTab: persistedState.agentAssetTab === 'references' ? 'references' : 'outputs',
       agentAssetPanelCollapsed: Boolean(persistedState.agentAssetPanelCollapsed),
       favoriteCollections,

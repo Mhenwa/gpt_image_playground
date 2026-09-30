@@ -1028,8 +1028,12 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
         (opts.maskDataUrl ? getDataUrlEncodedByteSize(opts.maskDataUrl) : 0),
     )
 
+    // New API 的 Responses 路由/计费只读取顶层 model，不解析 image_generation.tool.model。
+    // 本站同源代理固定指向 New API，因此代理模式下将模型栏选中的图片模型同步到顶层；
+    // 直连官方或其他兼容服务时保留标准 Responses 语义：顶层文本模型 + 工具图片模型。
+    const requestModel = useApiProxy ? getImageGenerationModel(profile) || profile.model : profile.model
     const body: Record<string, unknown> = {
-      model: profile.model,
+      model: requestModel,
       input: createResponsesInput(requestPrompt, inputImageDataUrls, opts.settings.allowPromptRewrite),
       tools: [createResponsesImageTool(params, inputImageDataUrls.length > 0, profile, opts.maskDataUrl, opts.nativeTransparentBackground)],
       tool_choice: 'required',

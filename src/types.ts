@@ -5,6 +5,18 @@ export const REASONING_EFFORT_VALUES = ['none', 'minimal', 'low', 'medium', 'hig
 export type ReasoningEffort = typeof REASONING_EFFORT_VALUES[number]
 export type AppMode = 'gallery' | 'agent'
 export type AgentApiConfigMode = 'off' | 'native' | 'hybrid'
+/** 同一个服务配置下，分别保存画廊与 Agent 的用途偏好。旧版字段仍保留用于兼容导入和历史任务。 */
+export interface ApiProfileUsage {
+  gallery?: {
+    apiMode?: ApiMode
+    model?: string
+  }
+  agent?: {
+    mode?: AgentApiConfigMode
+    textModel?: string
+    imageModel?: string
+  }
+}
 export const ZIP_DOWNLOAD_ROUTE_VALUES = [
   'task-selection',
   'favorite-collection-selection',
@@ -89,7 +101,9 @@ export interface ApiProfile {
   streamImages?: boolean
   streamPartialImages?: number
   transparentBackgroundMethod: 'api' | 'local'
-  providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'model' | 'imageGenerationModel' | 'apiMode' | 'reasoningEffort' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages' | 'transparentBackgroundMethod'>>>>
+  providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'model' | 'imageGenerationModel' | 'apiMode' | 'reasoningEffort' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages' | 'transparentBackgroundMethod' | 'usage'>>>>
+  /** 新版总配置：全局连接字段在 Profile 顶层，以下字段仅保存用途级偏好。 */
+  usage?: ApiProfileUsage
 }
 
 export interface PresetAgentConfig {
@@ -123,6 +137,7 @@ export interface AppSettings {
   alwaysShowRetryButton: boolean
   allowPromptRewrite: boolean
   taskCompletionNotification: boolean
+  /** 旧备份兼容字段，现固定为 Enter 发送 / Shift+Enter 换行 */
   enterSubmit: boolean
   zipDownloadRoutes: ZipDownloadRoute[]
   agentScrollToBottomAfterSubmit: boolean
@@ -199,6 +214,8 @@ export interface TaskRecord {
   apiMode?: ApiMode
   /** 生成时使用的模型 ID */
   apiModel?: string
+  /** Responses 协议使用的文本主模型快照，与 apiModel 中的生图模型分开保存 */
+  apiResponsesModel?: string
   /** fal.ai 队列请求 ID，用于连接断开后的结果恢复 */
   falRequestId?: string
   /** fal.ai 队列 endpoint，用于连接断开后的状态和结果查询 */

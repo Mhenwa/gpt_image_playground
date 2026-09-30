@@ -968,6 +968,42 @@ describe('callImageApi', () => {
     )
   })
 
+  it('uses the selected image model as the top-level Responses model through the New API proxy', async () => {
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      output: [{ type: 'image_generation_call', result: 'aW1hZ2U=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiMode: 'responses',
+        apiProxy: true,
+        model: 'gpt-5.6-sol',
+        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
+          ...profile,
+          apiKey: 'test-key',
+          apiMode: 'responses' as const,
+          apiProxy: true,
+          model: 'gpt-5.6-sol',
+          imageGenerationModel: 'gpt-image-2.5',
+        })),
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })
+
+    const [, init] = fetchMock.mock.calls[0]
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body.model).toBe('gpt-image-2.5')
+    expect(body.tools[0].model).toBe('gpt-image-2.5')
+  })
+
   it('uses the same-origin API proxy path for sync custom providers', async () => {
     vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({

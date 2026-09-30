@@ -20,7 +20,8 @@ import type {
   StoredImageThumbnail,
 } from './types'
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_PARAMS } from './types'
-import { DEFAULT_SETTINGS, getActiveApiProfile, getAgentImageApiProfile, getAgentTextApiProfile, getCustomProviderDefinition, mergeImportedSettings, mergePresetImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
+import { DEFAULT_SETTINGS, getActiveApiProfile, getAgentImageApiProfile, getAgentTextApiProfile, getCustomProviderDefinition, getGalleryApiProfile, mergeImportedSettings, mergePresetImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
+import { createRequestSettingsForProfile } from './lib/requestSettings'
 import { enforcePresetConfigPolicy, getPresetConfig, getPresetProfileIds, getPresetProviderIds, isPresetConfigDeletionPrevented, isPresetConfigOnlyEnabled, isPresetConfigParamsLocked, isPresetProfile, isPresetProviderDeletionPrevented } from './lib/presetConfig'
 import { dismissAllTooltips } from './lib/tooltipDismiss'
 import { remapImageMentionsForOrder, replaceImageMentionsForApi } from './lib/promptImageMentions'
@@ -56,6 +57,7 @@ import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
+import { getImageGenerationModel, isLikelyImageModel } from './lib/imageModels'
 import { createTransparentOutputMeta, getTransparentRequestParams, removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
 import { blobToDataUrl, fileToDataUrl } from './lib/dataUrl'
 import { cacheImage, cacheThumbnail, clearImageCaches, deleteCachedImage, deleteImageCacheEntry, ensureImageCached, scheduleThumbnailBackfill } from './lib/imageCache'
@@ -322,6 +324,7 @@ interface AppState {
   activeAgentConversationId: string | null
   agentInputDrafts: Record<string, AgentInputDraft>
   agentSidebarCollapsed: boolean
+  agentMobileSidebarOpen: boolean
   agentAssetTab: 'references' | 'outputs'
   agentAssetPanelCollapsed: boolean
   agentMobileHeaderVisible: boolean
@@ -336,6 +339,7 @@ interface AppState {
   deleteAgentRound: (conversationId: string, roundId: string) => Promise<AgentDeletionResult>
   deleteAgentAssistantMessage: (conversationId: string, messageId: string) => Promise<AgentDeletionResult>
   setAgentSidebarCollapsed: (collapsed: boolean) => void
+  setAgentMobileSidebarOpen: (open: boolean) => void
   setAgentAssetTab: (tab: 'references' | 'outputs') => void
   setAgentAssetPanelCollapsed: (collapsed: boolean) => void
   setAgentMobileHeaderVisible: (visible: boolean) => void
@@ -503,6 +507,7 @@ export const useStore = create<AppState>()(
             agentInputDrafts,
             galleryInputDraft,
             agentMobileHeaderVisible: true,
+            agentMobileSidebarOpen: false,
             selectedTaskIds: [],
             selectedFavoriteCollectionIds: [],
             agentEditingRoundId: null,
@@ -516,13 +521,24 @@ export const useStore = create<AppState>()(
         const activeProfile = getActiveApiProfile(settings)
         const agentValidationError = getAgentProfileValidationError(settings)
 
+        if (activeProfile.usage && agentValidationError) {
+          state.setConfirmDialog({
+            title: '请完善 Agent 配置',
+            message: `${agentValidationError.message}\n\n画廊和 Agent 共用当前服务的 API 地址与 Key，不需要再创建一份连接配置。`,
+            confirmText: '去设置',
+            cancelText: '取消',
+            action: () => useStore.getState().setShowSettings(true, 'agent'),
+          })
+          return
+        }
+
         if (!agentValidationError) {
           const galleryInputDraft = saveGalleryInputDraft(state)
           set((state) => ({
             appMode: 'agent',
             galleryInputDraft,
-            agentMobileHeaderVisible: false,
-            agentSidebarCollapsed: true,
+            agentMobileHeaderVisible: true,
+            agentMobileSidebarOpen: false,
             agentAssetPanelCollapsed: true,
             selectedTaskIds: [],
             selectedFavoriteCollectionIds: [],
@@ -776,7 +792,8 @@ export const useStore = create<AppState>()(
       agentConversationsLoaded: false,
       activeAgentConversationId: null,
       agentInputDrafts: {},
-      agentSidebarCollapsed: true,
+      agentSidebarCollapsed: false,
+      agentMobileSidebarOpen: false,
       agentAssetTab: 'outputs',
       agentAssetPanelCollapsed: false,
       agentMobileHeaderVisible: false,
@@ -785,8 +802,12 @@ export const useStore = create<AppState>()(
       agentGeneratingTitleIds: {},
       createAgentConversation: () => {
         const now = Date.now()
-        const latestConversation = getLatestAgentConversation(get().agentConversations)
-        if (latestConversation && isEmptyAgentConversation(latestConversation)) {
+        const currentState = get()
+        const latestConversation = getLatestAgentConversation(currentState.agentConversations)
+        const savedInputDrafts = saveActiveAgentInputDrafts(currentState)
+        const latestDraft = latestConversation ? savedInputDrafts[latestConversation.id] : undefined
+        // 未发送的草稿也要保留，新对话应从空白输入开始。
+        if (latestConversation && isEmptyAgentConversation(latestConversation) && (!latestDraft || isEmptyAgentInputDraft(latestDraft))) {
           set((state) => {
             const agentInputDrafts = saveActiveAgentInputDrafts(state)
             return {
@@ -797,7 +818,7 @@ export const useStore = create<AppState>()(
               ),
               activeAgentConversationId: latestConversation.id,
               agentInputDrafts,
-              agentSidebarCollapsed: true,
+              agentMobileSidebarOpen: false,
               agentEditingRoundId: null,
               ...restoreAgentInputDraftState(agentInputDrafts, latestConversation.id),
             }
@@ -815,7 +836,7 @@ export const useStore = create<AppState>()(
             ],
             activeAgentConversationId: conversation.id,
             agentInputDrafts,
-            agentSidebarCollapsed: true,
+            agentMobileSidebarOpen: false,
             agentEditingRoundId: null,
             ...restoreAgentInputDraftState(agentInputDrafts, conversation.id),
           }
@@ -826,7 +847,7 @@ export const useStore = create<AppState>()(
         if (state.activeAgentConversationId === id) {
           return {
             activeAgentConversationId: id,
-            agentSidebarCollapsed: true,
+            agentMobileSidebarOpen: false,
             agentAssetPanelCollapsed: true,
             agentEditingRoundId: null,
           }
@@ -835,7 +856,7 @@ export const useStore = create<AppState>()(
         return {
           activeAgentConversationId: id,
           agentInputDrafts,
-          agentSidebarCollapsed: true,
+          agentMobileSidebarOpen: false,
           agentAssetPanelCollapsed: true,
           agentEditingRoundId: null,
           ...restoreAgentInputDraftState(agentInputDrafts, id),
@@ -861,6 +882,7 @@ export const useStore = create<AppState>()(
       deleteAgentRound: (conversationId, roundId) => deleteAgentRoundAndTasks(conversationId, roundId),
       deleteAgentAssistantMessage: (conversationId, messageId) => deleteAgentAssistantMessageAndTasks(conversationId, messageId),
       setAgentSidebarCollapsed: (agentSidebarCollapsed) => set({ agentSidebarCollapsed }),
+      setAgentMobileSidebarOpen: (agentMobileSidebarOpen) => set({ agentMobileSidebarOpen }),
       setAgentAssetTab: (agentAssetTab) => set({ agentAssetTab }),
       setAgentAssetPanelCollapsed: (agentAssetPanelCollapsed) => set({ agentAssetPanelCollapsed }),
       setAgentMobileHeaderVisible: (agentMobileHeaderVisible) => set({ agentMobileHeaderVisible }),
@@ -1185,30 +1207,54 @@ function getCustomRecoveryProfile(settings: AppSettings, task: TaskRecord) {
 export function getTaskApiProfile(settings: AppSettings, task: TaskRecord): ApiProfile | null {
   const normalized = normalizeSettings(settings)
   if (!task.apiProfileId) return null
-  return normalized.profiles.find((profile) => profile.id === task.apiProfileId) ?? null
+  const profile = normalized.profiles.find((item) => item.id === task.apiProfileId)
+  if (!profile) return null
+  if (!profile.usage) return profile
+  const profileSettings = normalizeSettings({ profiles: normalized.profiles, customProviders: normalized.customProviders, activeProfileId: profile.id })
+  let resolved = task.agentConversationId
+    ? getAgentImageApiProfile(profileSettings) ?? getGalleryApiProfile(profileSettings)
+    : getGalleryApiProfile(profileSettings)
+  // A queued task retains the model/protocol that was displayed at submission,
+  // even if the service's defaults are changed while it is running.
+  const apiMode = task.apiMode ?? resolved.apiMode
+  if (apiMode === 'responses' && profile.provider === 'openai') {
+    // A historical native task still needs a text mainline model when the
+    // current service has since been changed to mixed mode or disabled.
+    const textSettings = normalizeSettings({
+      ...profileSettings,
+      profiles: profileSettings.profiles.map((item) => item.id === profile.id
+        ? { ...item, usage: { ...item.usage, agent: { ...item.usage?.agent, mode: 'native' as const } } }
+        : item),
+    })
+    resolved = getAgentTextApiProfile(textSettings) ?? resolved
+  }
+  return {
+    ...resolved,
+    apiMode,
+    model: apiMode === 'images' ? task.apiModel || resolved.model : task.apiResponsesModel || resolved.model,
+    imageGenerationModel: apiMode === 'responses' ? task.apiModel || resolved.imageGenerationModel : resolved.imageGenerationModel,
+  }
 }
 
 function createSettingsForApiProfile(settings: AppSettings, profile: ApiProfile): AppSettings {
-  const normalized = normalizeSettings(settings)
-  return normalizeSettings({
-    ...normalized,
-    baseUrl: profile.baseUrl,
-    apiKey: profile.apiKey,
-    model: profile.model,
-    timeout: profile.timeout,
-    apiMode: profile.apiMode,
-    codexCli: profile.codexCli,
-    apiProxy: profile.apiProxy,
-    profiles: normalized.profiles.map((item) => item.id === profile.id ? profile : item),
-    activeProfileId: profile.id,
-  })
+  return createRequestSettingsForProfile(settings, profile)
 }
 
 function getAgentProfileValidationError(settings: AppSettings): { profile: ApiProfile | null; message: string } | null {
   const normalized = normalizeSettings(settings)
   const textProfile = getAgentTextApiProfile(normalized)
-  if (!textProfile || textProfile.provider !== 'openai' || textProfile.apiMode !== 'responses') {
-    return { profile: textProfile, message: 'Agent 模式需要使用支持 Responses API 的 OpenAI 兼容文本模型配置。' }
+  if (!textProfile) {
+    const active = normalized.profiles.find((profile) => profile.id === normalized.activeProfileId)
+    return { profile: null, message: active?.usage?.agent?.mode === 'off'
+      ? '当前服务的 Agent 已关闭，请在 API 配置 → Agent 配置中选择混合或原生模式。'
+      : '当前没有可用的 Agent 对话模型，请在 API 配置 → Agent 配置中填写支持 Responses 的对话模型。' }
+  }
+  if (textProfile.provider !== 'openai' || textProfile.apiMode !== 'responses') {
+    const modeHint = textProfile.apiMode === 'images' ? '它是 Images API 生图配置，只能用于画廊生图' : '它不是可用于 Agent 对话的 Responses API 配置'
+    return { profile: textProfile, message: `当前 Agent 对话配置「${textProfile.name}」使用的是${modeHint}。请在 API 配置 → Agent 配置中选择支持 Responses 的服务和对话模型。` }
+  }
+  if (isLikelyImageModel(textProfile.model)) {
+    return { profile: textProfile, message: 'Agent 对话模型不能使用 GPT Image 模型，请选择支持 Responses 对话和工具调用的文本模型。' }
   }
   const textProfileError = validateApiProfile(textProfile)
   if (textProfileError) return { profile: textProfile, message: `文本模型 API 配置不完整：${textProfileError}` }
@@ -1225,7 +1271,9 @@ function getAgentProfileValidationError(settings: AppSettings): { profile: ApiPr
 
 function getReusedTaskApiProfile(settings: AppSettings, profileId: string | null): ApiProfile | null {
   if (!profileId) return null
-  return normalizeSettings(settings).profiles.find((profile) => profile.id === profileId) ?? null
+  const normalized = normalizeSettings(settings)
+  const profile = normalized.profiles.find((item) => item.id === profileId)
+  return profile ? getGalleryApiProfile({ profiles: normalized.profiles, customProviders: normalized.customProviders, activeProfileId: profile.id }) : null
 }
 
 function getTaskApiProfileName(task: TaskRecord) {
@@ -1641,7 +1689,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     useStore.getState()
 
   const normalizedSettings = normalizeSettings(settings)
-  let activeProfile = getActiveApiProfile(settings)
+  let activeProfile = getGalleryApiProfile(settings)
   let requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
   if (normalizedSettings.reuseTaskApiProfileTemporarily && (reusedTaskApiProfileId || reusedTaskApiProfileMissing)) {
     const reusedProfile = getReusedTaskApiProfile(normalizedSettings, reusedTaskApiProfileId)
@@ -1736,7 +1784,8 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     apiProfileId: activeProfile.id,
     apiProfileName: activeProfile.name,
     apiMode: activeProfile.apiMode,
-    apiModel: activeProfile.model,
+    apiModel: getImageGenerationModel(activeProfile),
+    apiResponsesModel: activeProfile.apiMode === 'responses' ? activeProfile.model : undefined,
     inputImageIds: orderedInputImages.map((i) => i.id),
     maskTargetImageId,
     maskImageId,
@@ -2254,7 +2303,7 @@ async function continueRecoveredAgentRound(taskId: string) {
     }
     const roundTasks = updatedState.tasks.filter((item) => item.agentRoundId === round.id)
     const resumeParams = roundTasks.find((item) => item.params)?.params
-      ?? normalizeParamsForSettings(updatedState.params, createSettingsForApiProfile(normalizedSettings, imageProfile), { hasInputImages: round.inputImageIds.length > 0 })
+      ?? normalizeParamsForSettings(updatedState.params, createSettingsForApiProfile(normalizedSettings, imageProfile), { hasInputImages: round.inputImageIds.length > 0, agentMode: true })
     const maxToolCalls = Number.isFinite(normalizedSettings.agentMaxToolRounds)
       ? Math.max(1, Math.trunc(normalizedSettings.agentMaxToolRounds))
       : DEFAULT_AGENT_MAX_TOOL_ROUNDS
@@ -2367,7 +2416,7 @@ export async function submitAgentMessage() {
   const parentRoundId = editingRound ? editingRound.parentRoundId ?? null : activeLeafId
   const parentPath = parentRoundId ? getAgentRoundPath(conversation, parentRoundId) : []
   const normalizedParams = {
-    ...normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: inputImageIds.length > 0 }),
+    ...normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: inputImageIds.length > 0, agentMode: true }),
     n: DEFAULT_PARAMS.n,
     transparent_output: false,
   }
@@ -2472,7 +2521,7 @@ export async function regenerateAgentAssistantMessage(conversationId: string, ro
   const requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
   const imageRequestSettings = createSettingsForApiProfile(normalizedSettings, imageProfile)
   const normalizedParams = {
-    ...normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: inputImageIds.length > 0 }),
+    ...normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: inputImageIds.length > 0, agentMode: true }),
     n: DEFAULT_PARAMS.n,
     transparent_output: false,
   }
@@ -2584,7 +2633,7 @@ async function executeAgentRound(
     const resumedAssistantContent = resume ? existingAssistantMessage?.content.trim() ?? '' : ''
     const shouldStreamAssistantMessage = activeProfile.streamImages === true
     const imageRequestSettings = createSettingsForApiProfile(requestSettings, imageProfile)
-    const imageParams = normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: round.inputImageIds.length > 0 })
+    const imageParams = normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: round.inputImageIds.length > 0, agentMode: true })
     const streamingTaskIds: string[] = resume ? [...round.outputTaskIds] : []
     const taskIdByToolCallId = new Map<string, string>()
     const taskByToolCallId = new Map<string, TaskRecord>()
@@ -2647,7 +2696,8 @@ async function executeAgentRound(
         apiProfileId: imageProfile.id,
         apiProfileName: imageProfile.name,
         apiMode: imageProfile.apiMode,
-        apiModel: imageProfile.model,
+        apiModel: getImageGenerationModel(imageProfile),
+        apiResponsesModel: imageProfile.apiMode === 'responses' ? imageProfile.model : undefined,
         inputImageIds,
         maskTargetImageId: options.maskTargetImageId !== undefined ? options.maskTargetImageId : round.maskTargetImageId ?? null,
         maskImageId: options.maskImageId !== undefined ? options.maskImageId : round.maskImageId ?? null,
@@ -2904,7 +2954,7 @@ async function executeAgentRound(
       const references = await resolveReferenceImages(referenceIds)
       const toolCallId = callId || genId()
       const taskParams = {
-        ...normalizeParamsForSettings(imageParams, imageRequestSettings, { hasInputImages: references.dataUrls.length > 0 }),
+        ...normalizeParamsForSettings(imageParams, imageRequestSettings, { hasInputImages: references.dataUrls.length > 0, agentMode: true }),
         n: 1,
       }
 
@@ -2971,7 +3021,7 @@ async function executeAgentRound(
         const batchToolCallId = genId()
         const taskParams = requestSettings.agentApiConfigMode === 'hybrid'
           ? {
-              ...normalizeParamsForSettings(imageParams, imageRequestSettings, { hasInputImages: references.dataUrls.length > 0 }),
+              ...normalizeParamsForSettings(imageParams, imageRequestSettings, { hasInputImages: references.dataUrls.length > 0, agentMode: true }),
               n: 1,
             }
           : { ...imageParams, n: 1 }
@@ -3229,7 +3279,8 @@ async function executeAgentRound(
           apiProfileId: imageProfile.id,
           apiProfileName: imageProfile.name,
           apiMode: imageProfile.apiMode,
-          apiModel: imageProfile.model,
+          apiModel: getImageGenerationModel(imageProfile),
+          apiResponsesModel: imageProfile.apiMode === 'responses' ? imageProfile.model : undefined,
           inputImageIds: uniqueIds([...(round?.inputImageIds ?? []), ...promptRefs.imageIds]),
           maskTargetImageId: round?.maskTargetImageId ?? null,
           maskImageId: round?.maskImageId ?? null,
@@ -3522,7 +3573,7 @@ async function executeTask(taskId: string) {
     })
     return
   }
-  const activeProfile = taskProfile ?? getActiveApiProfile(settings)
+  const activeProfile = taskProfile ?? getGalleryApiProfile(settings)
   const requestSettings = createSettingsForApiProfile(settings, activeProfile)
   const taskProvider = taskProfile?.provider ?? task.apiProvider ?? activeProfile.provider
   let falRequestInfo: { requestId: string; endpoint: string } | null = task.falRequestId && task.falEndpoint
@@ -3689,7 +3740,7 @@ async function executeTask(taskId: string) {
       const settings = useStore.getState().settings
       const profile = getTaskApiProfile(settings, latestTask)
       const usesApiProxy = profile?.apiProxy ?? settings.apiProxy
-      const activeProfile = getActiveApiProfile(settings)
+      const activeProfile = getGalleryApiProfile(settings)
       const hintProfile = profile ?? {
         provider: latestTask.apiProvider ?? activeProfile.provider,
         apiMode: settings.apiMode,
@@ -3819,8 +3870,8 @@ export async function deleteFavoriteCollection(collectionId: string, deleteTasks
 /** 重试失败的任务：创建新任务并执行 */
 export async function retryTask(task: TaskRecord) {
   const { settings } = useStore.getState()
-  const activeProfile = getActiveApiProfile(settings)
-  const normalizedParams = normalizeParamsForSettings(task.params, settings, { hasInputImages: task.inputImageIds.length > 0 })
+  const activeProfile = getGalleryApiProfile(settings)
+  const normalizedParams = normalizeParamsForSettings(task.params, settings, { hasInputImages: task.inputImageIds.length > 0, agentMode: isAgentTask(task) })
   const shouldUseTransparentOutput = (normalizedParams.output_format === 'png' || normalizedParams.output_format === 'webp') && normalizedParams.transparent_output
   const taskParams = shouldUseTransparentOutput
     ? getTransparentRequestParams(normalizedParams)
@@ -3837,7 +3888,8 @@ export async function retryTask(task: TaskRecord) {
     apiProfileId: activeProfile.id,
     apiProfileName: activeProfile.name,
     apiMode: activeProfile.apiMode,
-    apiModel: activeProfile.model,
+    apiModel: getImageGenerationModel(activeProfile),
+    apiResponsesModel: activeProfile.apiMode === 'responses' ? activeProfile.model : undefined,
     inputImageIds: [...task.inputImageIds],
     maskTargetImageId: task.maskTargetImageId ?? null,
     maskImageId: task.maskImageId ?? null,

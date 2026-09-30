@@ -15,12 +15,14 @@ import {
   findEquivalentApiProfile,
   getApiProviderLabel,
   getActiveApiProfile,
+  getGalleryApiProfile,
   getCustomProviderDefinition,
   importCustomProviderSettingsFromJson,
   getDefaultApiProfileId,
   isAgentTextApiProfile,
   isOpenAICompatibleProvider,
   mergeImportedSettings,
+  migrateSettingsToServiceConfig,
   normalizeAgentMaxToolRounds,
   normalizeCustomProviderDefinition,
   normalizeSettings,
@@ -49,6 +51,7 @@ import {
 } from '../lib/settingsCustomProvider'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
+import useModelCatalog from '../hooks/useModelCatalog'
 import { DEFAULT_DROPDOWN_MAX_HEIGHT, getDropdownMaxHeight } from '../lib/dropdown'
 import Select from './Select'
 import { Checkbox } from './Checkbox'
@@ -61,6 +64,7 @@ import CustomProviderModal from './settings/CustomProviderModal'
 import ProfileImportUrlModal, { type CopyImportUrlOptions } from './settings/ProfileImportUrlModal'
 import ZipDownloadRouteModal, { ZIP_DOWNLOAD_ROUTE_OPTIONS } from './settings/ZipDownloadRouteModal'
 import MarkdownRenderer from './MarkdownRenderer'
+import ModelPicker from './input/modelPicker'
 
 function newId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -192,6 +196,7 @@ export default function SettingsModal() {
   const [profileImportUrlTooltipVisible, setProfileImportUrlTooltipVisible] = useState(false)
   const [duplicateProfileTooltipVisible, setDuplicateProfileTooltipVisible] = useState(false)
   const [activeTab, setActiveTab] = useState<SettingsTab>('api')
+  const [apiSection, setApiSection] = useState<'global' | 'gallery' | 'agent'>('global')
   const [exportConfig, setExportConfig] = useState(true)
   const [exportTasks, setExportTasks] = useState(true)
   const [importConfig, setImportConfig] = useState(true)
@@ -300,14 +305,21 @@ export default function SettingsModal() {
     ?? null
   const selectedAgentImageProfile = agentProfiles.find((profile) => profile.id === draft.agentImageProfileId)
     ?? null
-  const agentTextProfileOptions = agentTextProfiles.map((profile) => ({
-    label: `${profile.name} · ${profile.model || DEFAULT_RESPONSES_MODEL}`,
-    value: profile.id,
-  }))
-  const agentImageProfileOptions = agentProfiles.map((profile) => ({
-    label: `${profile.name} · ${getApiProviderLabel(draft, profile.provider)} · ${profile.model}`,
-    value: profile.id,
-  }))
+  const galleryApiMode = activeProfile.usage?.gallery?.apiMode ?? activeProfile.apiMode ?? 'images'
+  const galleryModel = activeProfile.usage?.gallery?.model
+    ?? (galleryApiMode === 'responses' ? activeProfile.imageGenerationModel || DEFAULT_IMAGES_MODEL : activeProfile.model)
+  const agentMode = activeProfile.usage?.agent?.mode ?? (activeProfile.usage ? 'hybrid' : draft.agentApiConfigMode)
+  const agentTextModel = activeProfile.usage?.agent?.textModel
+    ?? selectedAgentTextProfile?.model
+    ?? (activeProfile.apiMode === 'responses' ? activeProfile.model : DEFAULT_RESPONSES_MODEL)
+  const agentImageModel = activeProfile.usage?.agent?.imageModel
+    ?? (selectedAgentImageProfile?.apiMode === 'responses' ? selectedAgentImageProfile.imageGenerationModel : selectedAgentImageProfile?.model)
+    ?? galleryModel
+  const hasLegacySeparateAgent = !activeProfile.usage && Boolean(
+    selectedAgentTextProfile && selectedAgentTextProfile.id !== activeProfile.id
+    || selectedAgentImageProfile && selectedAgentImageProfile.id !== activeProfile.id,
+  )
+  const modelCatalog = useModelCatalog(activeProfile, showSettings && activeTab === 'api' && apiSection !== 'global')
 
   const wasSettingsOpenRef = useRef(false)
 
@@ -319,7 +331,7 @@ export default function SettingsModal() {
     if (wasSettingsOpenRef.current) return
 
     wasSettingsOpenRef.current = true
-    const normalizedSettings = normalizeSettings(settings)
+    const normalizedSettings = migrateSettingsToServiceConfig(settings)
     const displaySettings = normalizedSettings.reuseTaskApiProfileTemporarily && reusedTaskApiProfileId && normalizedSettings.profiles.some((profile) => profile.id === reusedTaskApiProfileId)
       ? normalizeSettings({ ...normalizedSettings, activeProfileId: reusedTaskApiProfileId })
       : normalizedSettings
@@ -342,7 +354,13 @@ export default function SettingsModal() {
   }, [activeProfile.id, activeProfile.timeout])
 
   useEffect(() => {
-    if (showSettings && settingsTabRequest) setActiveTab(settingsTabRequest)
+    if (!showSettings || !settingsTabRequest) return
+    if (settingsTabRequest === 'agent') {
+      setActiveTab('api')
+      setApiSection('agent')
+    } else {
+      setActiveTab(settingsTabRequest)
+    }
   }, [settingsTabRequest, showSettings])
 
   const updateProfileMenuMaxHeight = useCallback(() => {
@@ -460,6 +478,8 @@ export default function SettingsModal() {
   }
 
   const createProfileImportUrl = (profile: ApiProfile, options: ProfileImportUrlOptions) => {
+    // Quick links import the gallery view; full service/Agent settings belong in a data backup.
+    profile = getGalleryApiProfile({ profiles: [profile], customProviders: draft.customProviders, activeProfileId: profile.id })
     const url = new URL(window.location.href)
     url.search = ''
     url.hash = ''
@@ -533,6 +553,43 @@ export default function SettingsModal() {
     if (activeProfileLocked && (Object.keys(patch).length !== 1 || patch.apiKey === undefined)) return
     const nextDraft = getDraftWithActiveProfilePatch(patch)
     commitSettings(nextDraft)
+  }
+
+  const updateGallerySettings = (patch: NonNullable<NonNullable<ApiProfile['usage']>['gallery']>) => {
+    if (hasLegacySeparateAgent) {
+      const gallery = { apiMode: galleryApiMode, model: galleryModel, ...patch }
+      updateActiveProfile({
+        apiMode: gallery.apiMode,
+        model: gallery.apiMode === 'responses'
+          ? activeProfile.apiMode === 'responses' ? activeProfile.model : agentTextModel
+          : gallery.model,
+        imageGenerationModel: gallery.model,
+      }, true)
+      return
+    }
+    updateActiveProfile({
+      usage: {
+        ...activeProfile.usage,
+        gallery: { apiMode: galleryApiMode, model: galleryModel, ...patch },
+        agent: activeProfile.usage?.agent ?? { mode: agentMode, textModel: agentTextModel, imageModel: agentImageModel },
+      },
+    }, true)
+  }
+
+  const updateAgentSettings = (patch: NonNullable<NonNullable<ApiProfile['usage']>['agent']>) => {
+    const agent = { mode: agentMode, textModel: agentTextModel, imageModel: agentImageModel, ...patch }
+    commitSettings({
+      ...getDraftWithActiveProfilePatch({
+        usage: {
+          ...activeProfile.usage,
+          gallery: activeProfile.usage?.gallery ?? { apiMode: galleryApiMode, model: galleryModel },
+          agent,
+        },
+      }),
+      agentApiConfigMode: agent.mode,
+      agentTextProfileId: activeProfile.id,
+      agentImageProfileId: activeProfile.id,
+    })
   }
 
   const handleClose = () => {
@@ -697,7 +754,14 @@ export default function SettingsModal() {
   const createNewProfile = () => {
     if (presetConfigOnly) return
     setReusedTaskApiProfile(null)
-    const profile = createDefaultOpenAIProfile({ id: newId('openai'), name: '新配置' })
+    const profile = createDefaultOpenAIProfile({
+      id: newId('openai'),
+      name: '新配置',
+      usage: {
+        gallery: { apiMode: 'images', model: DEFAULT_IMAGES_MODEL },
+        agent: { mode: 'hybrid', textModel: DEFAULT_RESPONSES_MODEL, imageModel: DEFAULT_IMAGES_MODEL },
+      },
+    })
     const nextDraft = normalizeSettings({ 
         ...draft, 
         profiles: [...draft.profiles, profile],
@@ -707,24 +771,6 @@ export default function SettingsModal() {
     setShowProfileMenu(false)
   }
 
-  const updateAgentApiConfigMode = (mode: AgentApiConfigMode) => {
-    commitSettings({
-      ...draft,
-      agentApiConfigMode: mode,
-      agentTextProfileId: mode !== 'off'
-        ? selectedAgentTextProfile?.id
-          ?? agentTextProfiles.find((profile) => profile.id === activeProfile.id)?.id
-          ?? agentTextProfiles[0]?.id
-          ?? draft.agentTextProfileId
-        : draft.agentTextProfileId,
-      agentImageProfileId: mode === 'hybrid'
-        ? selectedAgentImageProfile?.id
-          ?? agentProfiles.find((profile) => profile.id === activeProfile.id)?.id
-          ?? agentProfiles[0]?.id
-          ?? draft.agentImageProfileId
-        : draft.agentImageProfileId,
-    })
-  }
 
   const duplicateActiveProfile = () => {
     if (presetConfigOnly) return
@@ -1164,17 +1210,6 @@ export default function SettingsModal() {
                 习惯配置
               </button>
               <button
-                onClick={() => setActiveTab('agent')}
-                className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'agent' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8V4H8" />
-                  <rect width="16" height="12" x="4" y="8" rx="2" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2 14h2M20 14h2M15 13v2M9 13v2" />
-                </svg>
-                Agent 配置
-              </button>
-              <button
                 onClick={() => setActiveTab('data')}
                 className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'data' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
               >
@@ -1208,20 +1243,6 @@ export default function SettingsModal() {
               />
             )}
 
-            {activeTab === 'agent' && (
-              <AgentSettingsTab
-                draft={draft}
-                agentMaxToolRoundsInput={agentMaxToolRoundsInput}
-                agentTextProfileOptions={agentTextProfileOptions}
-                agentImageProfileOptions={agentImageProfileOptions}
-                selectedAgentTextProfile={selectedAgentTextProfile}
-                selectedAgentImageProfile={selectedAgentImageProfile}
-                setAgentMaxToolRoundsInput={setAgentMaxToolRoundsInput}
-                updateAgentApiConfigMode={updateAgentApiConfigMode}
-                commitSettings={commitSettings}
-                commitAgentMaxToolRounds={commitAgentMaxToolRounds}
-              />
-            )}
             
             {activeTab === 'api' && (
               <div className="space-y-4">
@@ -1424,6 +1445,27 @@ export default function SettingsModal() {
                   )}
                 </div>
 
+              <div role="tablist" aria-label="API 配置分类" className="grid grid-cols-3 gap-1 rounded-xl bg-gray-100/80 p-1 dark:bg-white/[0.04]">
+                {([
+                  ['global', '全局配置'],
+                  ['gallery', '画廊配置'],
+                  ['agent', 'Agent 配置'],
+                ] as const).map(([section, label]) => (
+                  <button
+                    key={section}
+                    type="button"
+                    role="tab"
+                    aria-selected={apiSection === section}
+                    aria-controls={`api-settings-${section}`}
+                    onClick={() => setApiSection(section)}
+                    className={`rounded-lg px-2 py-2 text-sm transition-colors ${apiSection === section ? 'bg-white text-blue-600 shadow-sm dark:bg-white/[0.08] dark:text-blue-400' : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'}`}
+                  >{label}</button>
+                ))}
+              </div>
+
+              {apiSection === 'global' && (
+              <div id="api-settings-global" role="tabpanel" aria-label="全局配置" className="space-y-4">
+              <p className="text-xs leading-relaxed text-gray-500 dark:text-gray-400">连接信息只配置一次，画廊和 Agent 共用当前服务的 API 地址、密钥与代理；各自的模型和调用方式在对应子页签中设置。</p>
               {/* 1. 配置名称 */}
               <label className="block">
                 <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">配置名称</span>
@@ -1458,6 +1500,7 @@ export default function SettingsModal() {
                   </div>
                   <input
                     value={activeProfile.baseUrl}
+                    aria-label="API URL"
                     onChange={(e) => updateActiveProfile({ baseUrl: e.target.value })}
                     onBlur={(e) => commitActiveProfilePatch({ baseUrl: e.target.value })}
                     type="text"
@@ -1508,6 +1551,7 @@ export default function SettingsModal() {
                 <div className="relative">
                   <input
                     value={activeProfile.apiKey}
+                    aria-label="API Key"
                     onChange={(e) => updateActiveProfile({ apiKey: e.target.value })}
                     onBlur={(e) => commitActiveProfilePatch({ apiKey: e.target.value })}
                     type={showApiKey ? 'text' : 'password'}
@@ -1540,16 +1584,23 @@ export default function SettingsModal() {
                 </div>
               </div>
 
-              {/* 6. API 接口（Images/Responses） */}
+              </div>
+              )}
+
+              {apiSection === 'gallery' && (
+              <div id="api-settings-gallery" role="tabpanel" aria-label="画廊配置" className="space-y-4">
+              <p className="text-xs leading-relaxed text-gray-500 dark:text-gray-400">画廊直接使用这里的生图模型。默认走 Images API，修改模型不会改变 Agent 的选择。</p>
+              {/* 6. 画廊配置：用途级协议与模型，不再复制一份 API Key/URL */}
               {activeProfile.provider === 'openai' && (
                 <div className="block">
-                  <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">API 接口</span>
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="block text-sm font-medium text-gray-700 dark:text-gray-200">画廊调用方式</span>
+                    <span className="text-[10px] text-gray-400">共用全局连接配置</span>
+                  </div>
+                  <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">调用协议</span>
                   <Select
-                    value={activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode}
-                    onChange={(value) => {
-                      const apiMode = value as AppSettings['apiMode']
-                      updateActiveProfile({ apiMode }, true)
-                    }}
+                    value={galleryApiMode}
+                    onChange={(value) => updateGallerySettings({ apiMode: value as AppSettings['apiMode'] })}
                     options={[
                       { label: 'Images API (/v1/images)', value: 'images' },
                       { label: 'Responses API (/v1/responses)', value: 'responses' },
@@ -1558,24 +1609,20 @@ export default function SettingsModal() {
                     className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                   />
                 <div data-selectable-text className="mt-1.5 text-xs text-gray-500 dark:text-gray-500">
-                    支持通过查询参数覆盖：<code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">apiMode=images</code> 或 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">apiMode=responses</code>。
+                    画廊默认使用 Images API；只有需要兼容特殊网关时才切换为 Responses API。
                   </div>
                 </div>
               )}
 
-              {/* 7. 模型 ID（紧跟接口选择） */}
-              <label className="block">
-                <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">
-                  模型 ID
-                </span>
-                <input
-                  value={activeProfile.model}
-                  onChange={(e) => updateActiveProfile({ model: e.target.value })}
-                  onBlur={(e) => commitActiveProfilePatch({ model: e.target.value })}
-                  type="text"
+              {/* 7. 画廊生图模型 */}
+              <div className="block text-sm">
+                <ModelPicker
+                  value={galleryModel}
+                  onChange={(model) => updateGallerySettings({ model })}
+                  catalog={modelCatalog}
                   disabled={activeProfileLocked}
-                  placeholder={activeProfile.provider === 'fal' ? DEFAULT_FAL_MODEL : getDefaultModelForMode(activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode)}
-                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                  label="画廊生图模型"
+                  ariaLabel="选择画廊生图模型"
                 />
                   <div data-selectable-text className="mt-1.5 text-xs text-gray-500 dark:text-gray-500">
                   {activeProfile.provider === 'fal' ? (
@@ -1586,38 +1633,58 @@ export default function SettingsModal() {
                     </>
                   ) : activeCustomProvider ? (
                     <>当前使用 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">{activeCustomProvider.name}</code>。</>
-                  ) : (activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode) === 'responses' ? (
-                    <>Responses API 需要使用支持 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">image_generation</code> 工具的文本模型，例如 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">{DEFAULT_RESPONSES_MODEL}</code>。</>
                   ) : (
                     <>Images API 需要使用 GPT Image 模型，例如 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">{DEFAULT_IMAGES_MODEL}</code>。</>
                   )}
-                  {activeProfile.provider === 'openai' && (
-                    <>支持通过查询参数覆盖：<code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">?model=</code>。</>
-                  )}
                 </div>
-              </label>
+              </div>
 
-              {activeProfile.provider === 'openai' && activeProfile.apiMode === 'responses' && (
-                <label className="block">
-                  <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">图像生成模型</span>
-                  <input
-                    value={activeProfile.imageGenerationModel ?? ''}
-                    onChange={(e) => updateActiveProfile({ imageGenerationModel: e.target.value })}
-                    onBlur={(e) => commitActiveProfilePatch({ imageGenerationModel: e.target.value })}
-                    type="text"
-                    disabled={activeProfileLocked}
-                    placeholder={DEFAULT_IMAGES_MODEL}
-                    className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
-                  />
-                  <div data-selectable-text className="mt-1.5 text-xs text-gray-500 dark:text-gray-500">
-                    Responses API 的 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">image_generation</code> 工具需要使用 GPT Image 模型，例如 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">{DEFAULT_IMAGES_MODEL}</code>。
-                    留空时不发送工具模型 ID，保持 API 默认值。
-                    支持通过查询参数覆盖：<code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">?imageGenerationModel=</code>。
-                  </div>
-                </label>
+              </div>
               )}
 
-              {(activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode) === 'responses' && activeProfile.provider === 'openai' && (
+              {apiSection === 'agent' && (
+              <div id="api-settings-agent" role="tabpanel" aria-label="Agent 配置" className="space-y-4">
+              {hasLegacySeparateAgent && (
+                <p className="rounded-xl bg-amber-50 p-3 text-xs leading-relaxed text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">当前保留了旧版独立服务设置，未自动合并不同的连接或密钥。修改这里的模式或模型后，Agent 将改为共用当前服务的全局连接配置。</p>
+              )}
+              {activeProfile.provider !== 'openai' && (
+                <p className="rounded-xl bg-gray-50 p-3 text-xs leading-relaxed text-gray-500 dark:bg-white/[0.04] dark:text-gray-400">Agent 需要支持 Responses API 的 OpenAI 兼容服务。请在全局配置中选择相应服务商。</p>
+              )}
+
+              {/* 8. Agent 配置：同一个服务配置下的用途级模型 */}
+              {activeProfile.provider === 'openai' && (
+                <div className="block rounded-2xl border border-blue-100 bg-blue-50/40 p-3 dark:border-blue-500/20 dark:bg-blue-500/[0.06]">
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-700 dark:text-gray-200">Agent 配置</span>
+                    <span className="text-[10px] text-gray-400">共用全局连接配置</span>
+                  </div>
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <span className="text-sm text-gray-600 dark:text-gray-300">模式</span>
+                    <div className="w-32 shrink-0">
+                      <Select
+                        value={agentMode}
+                        onChange={(value) => updateAgentSettings({ mode: value as AgentApiConfigMode })}
+                        options={[{ label: '混合（推荐）', value: 'hybrid' }, { label: '原生 Responses', value: 'native' }, { label: '关闭', value: 'off' }]}
+                        disabled={activeProfileLocked}
+                        className="w-full rounded-xl border border-gray-200/70 bg-white/70 px-3 py-1.5 text-xs text-gray-700 outline-none dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200"
+                      />
+                    </div>
+                  </div>
+                  <div className="mb-3 text-sm">
+                    <ModelPicker value={agentTextModel} onChange={(textModel) => updateAgentSettings({ textModel })} catalog={modelCatalog} disabled={activeProfileLocked || agentMode === 'off'} label="对话模型（Responses API）" ariaLabel="选择 Agent 对话模型" />
+                  </div>
+                  <div className="text-sm">
+                    <ModelPicker value={agentImageModel} onChange={(imageModel) => updateAgentSettings({ imageModel })} catalog={modelCatalog} disabled={activeProfileLocked || agentMode === 'off'} label="Agent 生图模型" ariaLabel="选择 Agent 生图模型" />
+                  </div>
+                  <div className="mt-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                    {agentMode === 'hybrid' ? '混合模式：普通聊天走 Responses API；模型判断需要图片时调用自定义生图工具，再单独请求 Images API。不向 Responses 提交原生 image_generation 工具，最终费用仍以服务商计费为准。'
+                      : agentMode === 'native' ? '原生模式：聊天和生图都走 Responses API，由模型自动调用内置 image_generation 工具；服务商可能另收工具费用。'
+                      : '已关闭当前服务的 Agent。画廊生图仍可使用。'}
+                  </div>
+                </div>
+              )}
+
+              {activeProfile.provider === 'openai' && (
                 <div className="block">
                   <div className="mb-1.5 flex items-center justify-between gap-3">
                     <span className="block text-sm text-gray-600 dark:text-gray-300">推理强度</span>
@@ -1629,7 +1696,7 @@ export default function SettingsModal() {
                           { label: '默认', value: '' },
                           ...REASONING_EFFORT_VALUES.map((value) => ({ label: value, value })),
                         ]}
-                        disabled={activeProfileLocked}
+                        disabled={activeProfileLocked || agentMode === 'off'}
                         className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-1.5 text-xs text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                       />
                     </div>
@@ -1640,9 +1707,31 @@ export default function SettingsModal() {
                 </div>
               )}
 
+              {activeProfile.provider === 'openai' && (
+                <p className="text-xs leading-relaxed text-gray-500 dark:text-gray-400">生图的流式传输与中间步骤图像设置复用“全局配置 → 共用生图高级选项”。</p>
+              )}
+              {activeProfile.provider === 'openai' && (
+                <AgentSettingsTab
+                  draft={draft}
+                  agentMaxToolRoundsInput={agentMaxToolRoundsInput}
+                  setAgentMaxToolRoundsInput={setAgentMaxToolRoundsInput}
+                  commitSettings={commitSettings}
+                  commitAgentMaxToolRounds={commitAgentMaxToolRounds}
+                />
+              )}
+              </div>
+              )}
+
+              {apiSection === 'global' && (
+              <div className="space-y-4">
+
               {/* 8. 流式传输 + 中间步骤图像数 */}
               {activeProfile.provider === 'openai' && (
                 <div className="block space-y-3">
+                  <div className="border-t border-gray-100 pt-4 dark:border-white/[0.08]">
+                    <div className="mb-1 text-sm font-medium text-gray-700 dark:text-gray-200">共用生图高级选项</div>
+                    <p className="text-xs leading-relaxed text-gray-500 dark:text-gray-400">流式传输和中间步骤图像数由画廊与 Agent 生图共同使用，不改变各自选择的模型或协议。</p>
+                  </div>
                   <div>
                     <div className="mb-1.5 flex items-center justify-between gap-3">
                       <span className="block text-sm text-gray-600 dark:text-gray-300">流式传输</span>
@@ -1686,6 +1775,12 @@ export default function SettingsModal() {
                   </div>
                 </div>
               )}
+
+              </div>
+              )}
+
+              {apiSection === 'gallery' && (
+              <div className="space-y-4">
 
               {/* 9. 透明背景实现方式 */}
               <div className="block">
@@ -1734,6 +1829,11 @@ export default function SettingsModal() {
                 </div>
               )}
 
+              </div>
+              )}
+
+              {apiSection === 'global' && (
+              <div className="space-y-4">
               {/* 11. Codex CLI 兼容模式 */}
               {activeProviderIsOpenAICompatible && (
                 <div className="block">
@@ -1772,6 +1872,8 @@ export default function SettingsModal() {
                     className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                   />
                 </label>
+              )}
+              </div>
               )}
             </div>
             )}

@@ -1,5 +1,4 @@
 import type { AppSettings } from '../../types'
-import Select from '../Select'
 
 interface GeneralSettingsTabProps {
   draft: AppSettings
@@ -18,42 +17,11 @@ export default function GeneralSettingsTab({
 }: GeneralSettingsTabProps) {
   return (
     <div className="space-y-4">
-      <div className="hidden sm:block">
-        <div className="mb-1 flex items-center justify-between">
-          <span className="block text-sm text-gray-600 dark:text-gray-300">任务提交方式</span>
-          <div className="w-28 shrink-0">
-            <Select
-              value={draft.enterSubmit ? 'enter' : 'ctrl-enter'}
-              onChange={(val) => commitSettings({ ...draft, enterSubmit: val === 'enter' })}
-              options={[
-                { label: navigator.userAgent.includes('Mac') ? '⌘ + Enter' : 'Ctrl + Enter', value: 'ctrl-enter' },
-                { label: 'Enter', value: 'enter' }
-              ]}
-              className="w-full px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] hover:bg-white dark:hover:bg-white/[0.06] text-xs transition-all duration-200 shadow-sm text-gray-700 dark:text-gray-200 outline-none"
-            />
-          </div>
-        </div>
-        <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
-          选择 {navigator.userAgent.includes('Mac') ? '⌘ + Enter' : 'Ctrl + Enter'} 时，Enter 换行；选择 Enter 时，Shift + Enter 换行。
-        </div>
-      </div>
-      <div className="sm:hidden">
-        <div className="mb-1 flex items-center justify-between gap-3">
-          <span className="block text-sm text-gray-600 dark:text-gray-300">任务提交方式</span>
-          <div className="w-28 shrink-0">
-            <Select
-              value={draft.enterSubmit ? 'enter' : 'button'}
-              onChange={(val) => commitSettings({ ...draft, enterSubmit: val === 'enter' })}
-              options={[
-                { label: '发送按钮', value: 'button' },
-                { label: '回车/发送按钮', value: 'enter' }
-              ]}
-              className="w-full px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] hover:bg-white dark:hover:bg-white/[0.06] text-xs transition-all duration-200 shadow-sm text-gray-700 dark:text-gray-200 outline-none"
-            />
-          </div>
-        </div>
-        <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
-          选择回车/发送按钮时，回车可提交；否则仅使用发送按钮提交。
+      <div className="block">
+        <span className="mb-1 block text-sm text-gray-600 dark:text-gray-300">输入快捷键</span>
+        <div data-selectable-text className="text-xs leading-relaxed text-gray-500 dark:text-gray-500">
+          Enter 发送消息或提交生图，Shift + Enter 换行；也兼容 Ctrl / ⌘ + Enter 发送。
+          中文输入法确认候选字时不会发送，选择 @ 图片候选时 Enter 只确认引用。
         </div>
       </div>
       <div className="block">
@@ -195,24 +163,6 @@ export default function GeneralSettingsTab({
         </div>
         <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
           开启后，在 Agent 模式发送消息成功后会自动滚动到对话底部。
-        </div>
-      </div>
-      <div className="block">
-        <div className="mb-1 flex items-center justify-between">
-          <span className="block text-sm text-gray-600 dark:text-gray-300">公式输出提示</span>
-          <button
-            type="button"
-            onClick={() => commitSettings({ ...draft, agentMathFormattingPrompt: !draft.agentMathFormattingPrompt })}
-            className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${draft.agentMathFormattingPrompt ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
-            role="switch"
-            aria-checked={draft.agentMathFormattingPrompt}
-            aria-label="公式输出提示"
-          >
-            <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${draft.agentMathFormattingPrompt ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
-          </button>
-        </div>
-        <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
-          开启后，Agent 会被要求使用 <code className="rounded bg-gray-100 px-1 py-0.5 font-mono text-[0.9em] text-gray-700 dark:bg-white/10 dark:text-gray-200">$...$</code> 和 <code className="rounded bg-gray-100 px-1 py-0.5 font-mono text-[0.9em] text-gray-700 dark:bg-white/10 dark:text-gray-200">$$...$$</code> 输出数学公式，确保渲染效果正常。
         </div>
       </div>
     </div>

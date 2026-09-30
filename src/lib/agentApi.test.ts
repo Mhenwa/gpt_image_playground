@@ -114,6 +114,40 @@ describe('callAgentResponsesApi', () => {
     })
   })
 
+  it('keeps the conversation model at the Responses level and sends the separate image model to the image tool', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      id: 'resp_model_split',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    const textProfile = createDefaultOpenAIProfile({
+      apiKey: 'text-key',
+      apiMode: 'responses',
+      model: 'gpt-6.1-sol',
+      imageGenerationModel: 'wrong-text-image',
+    })
+    const imageProfile = createDefaultOpenAIProfile({
+      apiKey: 'image-key',
+      apiMode: 'images',
+      model: 'gpt-image-2.5',
+    })
+
+    await callAgentResponsesApi({
+      settings: DEFAULT_SETTINGS,
+      profile: textProfile,
+      imageProfile,
+      params: DEFAULT_PARAMS,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }],
+    })
+
+    const [, init] = fetchMock.mock.calls[0]
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body.model).toBe('gpt-6.1-sol')
+    expect(body.tools[0].model).toBe('gpt-image-2.5')
+  })
+
   it('reports failed image output item without aborting the ongoing stream', async () => {
     const streamBody = [
       'data: {"type":"response.output_item.added","item":{"id":"ig_fail","type":"image_generation_call","status":"in_progress"},"output_index":0}',

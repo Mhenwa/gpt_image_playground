@@ -1,5 +1,5 @@
 import { DEFAULT_PARAMS, type AppSettings, type TaskParams } from '../types'
-import { getActiveApiProfile, isOpenAICompatibleProvider } from './apiProfiles'
+import { getGalleryApiProfile, isOpenAICompatibleProvider } from './apiProfiles'
 import { getImageGenerationModel, isGptImage25Model } from './imageModels'
 import { normalizeCodexCliImageSize, normalizeImageSize } from './size'
 
@@ -8,19 +8,20 @@ export const MAX_FAL_OUTPUT_IMAGES = 4
 export const MAX_OPENAI_OUTPUT_IMAGES = 10
 
 export function getOutputImageLimitForSettings(settings: AppSettings) {
-  return getActiveApiProfile(settings).provider === 'fal' ? MAX_FAL_OUTPUT_IMAGES : MAX_OPENAI_OUTPUT_IMAGES
+  return getGalleryApiProfile(settings).provider === 'fal' ? MAX_FAL_OUTPUT_IMAGES : MAX_OPENAI_OUTPUT_IMAGES
 }
 
 export function normalizeParamsForSettings(
   params: TaskParams,
   settings: AppSettings,
-  options: { hasInputImages?: boolean } = {},
+  options: { hasInputImages?: boolean; agentMode?: boolean } = {},
 ): TaskParams {
-  const activeProfile = getActiveApiProfile(settings)
+  const activeProfile = getGalleryApiProfile(settings)
   const outputImageLimit = getOutputImageLimitForSettings(settings)
   const nextParams: TaskParams = {
     ...params,
     size: normalizeImageSize(params.size) || DEFAULT_PARAMS.size,
+    moderation: DEFAULT_PARAMS.moderation,
     n: Math.min(outputImageLimit, Math.max(1, params.n || DEFAULT_PARAMS.n)),
   }
 
@@ -32,7 +33,6 @@ export function normalizeParamsForSettings(
   if (activeProfile.provider === 'fal') {
     if (!options.hasInputImages && nextParams.size === 'auto') nextParams.size = DEFAULT_FAL_IMAGE_SIZE
     if (nextParams.quality === 'auto') nextParams.quality = 'high'
-    nextParams.moderation = DEFAULT_PARAMS.moderation
     nextParams.output_compression = DEFAULT_PARAMS.output_compression
   }
 
@@ -40,7 +40,7 @@ export function normalizeParamsForSettings(
     nextParams.quality = 'high'
   }
 
-  if (nextParams.output_format === 'png') {
+  if (nextParams.output_format === 'png' || options.agentMode) {
     nextParams.output_compression = DEFAULT_PARAMS.output_compression
   }
 

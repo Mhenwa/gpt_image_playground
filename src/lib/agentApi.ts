@@ -168,10 +168,16 @@ function createGenerateImageFunctionTool() {
   }
 }
 
-function createAgentTools(params: TaskParams, profile: ApiProfile, settings: AppSettings, maskDataUrl?: string): Array<Record<string, unknown>> {
+function createAgentTools(
+  params: TaskParams,
+  profile: ApiProfile,
+  imageProfile: ApiProfile | undefined,
+  settings: AppSettings,
+  maskDataUrl?: string,
+): Array<Record<string, unknown>> {
   const tools: Array<Record<string, unknown>> = settings.agentApiConfigMode === 'hybrid'
     ? [createGenerateImageFunctionTool()]
-    : [createImageTool(params, profile, maskDataUrl)]
+    : [createImageTool(params, imageProfile ?? profile, maskDataUrl)]
   const singleImageToolInstruction = settings.agentApiConfigMode === 'hybrid'
     ? 'For single images or prerequisite/base images, use the generate_image tool instead.'
     : 'For single images or prerequisite/base images, use the built-in image_generation tool instead.'
@@ -620,7 +626,7 @@ export async function callAgentResponsesApi(opts: {
       model: profile.model,
       instructions: createAgentInstructions(settings, (imageProfile ?? profile).codexCli ? params.size : undefined),
       input,
-      tools: createAgentTools(params, profile, settings, maskDataUrl),
+      tools: createAgentTools(params, profile, imageProfile, settings, maskDataUrl),
     }
     if (profile.reasoningEffort) body.reasoning = { effort: profile.reasoningEffort }
     if (profile.streamImages) {

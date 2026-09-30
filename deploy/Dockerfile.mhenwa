@@ -1,0 +1,8 @@
+# 服务器已有已核验的 0.7.14 基础镜像；构建前会再次核对其镜像 ID。
+FROM ghcr.io/cooksleep/gpt_image_playground:latest
+
+# 前端在本机构建，首尔只合并静态文件，避免占用现有应用的编译内存。
+COPY dist/ /usr/share/nginx/html/
+COPY deploy/nginx.conf /etc/nginx/templates/default.conf.template
+
+LABEL cc.mhenwa.playground.patch="simplified-image-params-20260930-12"

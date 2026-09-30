@@ -4,6 +4,28 @@ import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_SETTINGS, 
 import { getOutputImageLimitForSettings, normalizeParamsForSettings } from './paramCompatibility'
 
 describe('parameter compatibility', () => {
+  it.each(['jpeg', 'webp'] as const)('keeps Gallery %s compression while replacing a legacy moderation choice', (output_format) => {
+    const settings = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [createDefaultOpenAIProfile()] })
+    const legacyParams = { ...DEFAULT_PARAMS, output_format, output_compression: 35, moderation: 'low' as const }
+
+    expect(normalizeParamsForSettings(legacyParams, settings)).toMatchObject({
+      output_compression: 35,
+      moderation: DEFAULT_PARAMS.moderation,
+    })
+    expect(legacyParams).toMatchObject({ output_compression: 35, moderation: 'low' })
+  })
+
+  it.each(['png', 'jpeg', 'webp'] as const)('uses default moderation and compression for Agent %s without mutating shared or historic params', (output_format) => {
+    const settings = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [createDefaultOpenAIProfile()] })
+    const legacyParams = { ...DEFAULT_PARAMS, output_format, output_compression: 35, moderation: 'low' as const }
+
+    expect(normalizeParamsForSettings(legacyParams, settings, { agentMode: true })).toMatchObject({
+      output_compression: DEFAULT_PARAMS.output_compression,
+      moderation: DEFAULT_PARAMS.moderation,
+    })
+    expect(legacyParams).toMatchObject({ output_compression: 35, moderation: 'low' })
+  })
+
   it('limits OpenAI output count to 10', () => {
     const openAIProfile = createDefaultOpenAIProfile({ apiKey: 'test-key', streamImages: false })
     const settings = normalizeSettings({

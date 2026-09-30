@@ -398,6 +398,54 @@ input[type="number"] {
   min-height: 3.5rem;
 }
 
+/* Agent 的侧栏、顶栏和输入框共享可用区域，收起侧栏时一起平移。 */
+.agent-workspace {
+  width: 100%;
+}
+
+.agent-sidebar {
+  width: min(320px, 85vw);
+  height: 100dvh;
+  padding-bottom: var(--safe-area-bottom);
+  transition: width 200ms ease;
+}
+
+@media (min-width: 1024px) {
+  .agent-app .agent-sidebar {
+    width: var(--agent-sidebar-width);
+  }
+
+  .agent-app .agent-header {
+    left: var(--agent-sidebar-width);
+    transition: left 200ms ease;
+  }
+
+  .agent-app .agent-workspace {
+    margin-left: var(--agent-sidebar-width);
+    width: calc(100% - var(--agent-sidebar-width));
+    transition: margin-left 200ms ease, width 200ms ease;
+  }
+
+  .agent-app .agent-input-bar {
+    left: calc(50% + var(--agent-sidebar-width) / 2);
+    width: calc(100% - var(--agent-sidebar-width));
+    transition: left 200ms ease, width 200ms ease;
+  }
+
+  .agent-app .agent-scroll-bottom {
+    left: calc(50% + var(--agent-sidebar-width) / 2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-app .agent-header,
+  .agent-app .agent-workspace,
+  .agent-app .agent-input-bar,
+  .agent-app .agent-sidebar {
+    transition: none;
+  }
+}
+
 @media (max-width: 640px) {
   input,
   textarea,

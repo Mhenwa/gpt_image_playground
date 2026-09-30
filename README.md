@@ -1,3 +1,5 @@
+> **Mhenwa 定制版**：在上游 v0.7.14 基础上统一 API 配置、分离画廊 / Agent 模型，并加入模型列表、混合 Agent 和左侧会话栏。定制版的配置方式与部署说明见 [MHENWA.md](MHENWA.md)；其中 API 配置说明优先于下方保留的上游文档。
+
 <div align="center">
 
 # 🎨 GPT Image Playground

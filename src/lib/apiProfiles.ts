@@ -3,6 +3,7 @@ import type {
   ApiProfile,
   ApiProvider,
   AppSettings,
+  ApiProfileUsage,
   PresetAgentConfig,
   PresetConfig,
   AgentApiConfigMode,
@@ -149,7 +150,59 @@ function normalizeAgentApiConfigMode(value: unknown): AgentApiConfigMode {
 }
 
 export function isAgentTextApiProfile(profile: ApiProfile): boolean {
-  return profile.provider === 'openai' && profile.apiMode === 'responses'
+  return profile.provider === 'openai' && (profile.apiMode === 'responses' || Boolean(profile.usage))
+}
+
+function normalizeProfileUsage(input: unknown, fallback: ApiProfile): ApiProfileUsage | undefined {
+  const record = isRecord(input) ? input : {}
+  if (!('gallery' in record) && !('agent' in record)) return undefined
+  const gallery = isRecord(record.gallery) ? record.gallery : {}
+  const agent = isRecord(record.agent) ? record.agent : {}
+  const galleryApiMode = gallery.apiMode === 'responses' || gallery.apiMode === 'images'
+    ? gallery.apiMode
+    : fallback.apiMode
+  const galleryModel = typeof gallery.model === 'string' && gallery.model.trim()
+    ? gallery.model.trim()
+    : fallback.apiMode === 'responses' ? (fallback.imageGenerationModel?.trim() || DEFAULT_IMAGES_MODEL) : fallback.model
+  const mode = agent.mode === 'native' || agent.mode === 'hybrid' || agent.mode === 'off' ? agent.mode : undefined
+  const textModel = typeof agent.textModel === 'string' && agent.textModel.trim() ? agent.textModel.trim() : undefined
+  const imageModel = typeof agent.imageModel === 'string' && agent.imageModel.trim() ? agent.imageModel.trim() : undefined
+  return {
+    gallery: { apiMode: galleryApiMode, model: galleryModel },
+    agent: {
+      ...(mode ? { mode } : {}),
+      ...(textModel ? { textModel } : {}),
+      ...(imageModel ? { imageModel } : {}),
+    },
+  }
+}
+
+function getServiceTextModel(profile: ApiProfile): string {
+  return profile.usage?.agent?.textModel?.trim()
+    || (profile.apiMode === 'responses' ? profile.model.trim() : '')
+    || DEFAULT_RESPONSES_MODEL
+}
+
+function getServiceImageModel(profile: ApiProfile, usage: 'gallery' | 'agent'): string {
+  if (profile.provider !== 'openai') return profile.model.trim()
+  return (usage === 'agent' ? profile.usage?.agent?.imageModel?.trim() : '')
+    || profile.usage?.gallery?.model?.trim()
+    || (profile.apiMode === 'responses' ? profile.imageGenerationModel?.trim() : profile.model.trim())
+    || DEFAULT_IMAGES_MODEL
+}
+
+/** A request snapshot must not retain service preferences: re-normalizing it would re-route the request. */
+function resolveServiceGalleryProfile(profile: ApiProfile): ApiProfile {
+  if (profile.provider !== 'openai') return { ...profile, usage: undefined, apiMode: 'images' }
+  const apiMode = profile.provider === 'openai' ? profile.usage?.gallery?.apiMode ?? profile.apiMode : 'images'
+  const imageModel = getServiceImageModel(profile, 'gallery')
+  return {
+    ...profile,
+    usage: undefined,
+    apiMode,
+    model: apiMode === 'responses' ? getServiceTextModel(profile) : imageModel,
+    imageGenerationModel: imageModel,
+  }
 }
 
 function isCustomProviderTemplate(value: unknown): value is CustomProviderTemplate {
@@ -360,7 +413,7 @@ export function createDefaultOpenAIProfile(overrides: Partial<ApiProfile> = {}):
   const apiMode = overrides.apiMode ?? DEFAULT_API_URL_PATCH?.apiMode ?? 'images'
   const streamImages = overrides.streamImages ?? DEFAULT_API_URL_PATCH?.streamImages ?? getDefaultStreamImages('openai', apiMode)
 
-  return {
+  const profile: ApiProfile = {
     id: DEFAULT_OPENAI_PROFILE_ID,
     name: DEFAULT_API_URL_PATCH?.name ?? '默认',
     provider: 'openai',
@@ -378,10 +431,12 @@ export function createDefaultOpenAIProfile(overrides: Partial<ApiProfile> = {}):
     apiMode,
     streamImages,
   }
+  if (overrides.usage) profile.usage = overrides.usage
+  return profile
 }
 
 export function createDefaultFalProfile(overrides: Partial<ApiProfile> = {}): ApiProfile {
-  return {
+  const profile: ApiProfile = {
     id: `fal-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     name: '新配置',
     provider: 'fal',
@@ -398,6 +453,8 @@ export function createDefaultFalProfile(overrides: Partial<ApiProfile> = {}): Ap
     transparentBackgroundMethod: 'api',
     ...overrides,
   }
+  if (overrides.usage) profile.usage = overrides.usage
+  return profile
 }
 
 export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvider, customProvider?: CustomProviderDefinition): ApiProfile {
@@ -415,6 +472,7 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
       streamImages: profile.streamImages,
       streamPartialImages: profile.streamPartialImages,
       transparentBackgroundMethod: profile.transparentBackgroundMethod,
+      usage: profile.provider === 'openai' ? profile.usage : undefined,
     },
   }
   const savedDraft = providerDrafts[provider]
@@ -423,6 +481,7 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
     return {
       ...profile,
       provider,
+      usage: undefined,
       baseUrl: savedDraft?.baseUrl ?? DEFAULT_FAL_BASE_URL,
       model: savedDraft?.model ?? DEFAULT_FAL_MODEL,
       imageGenerationModel: savedDraft?.imageGenerationModel ?? profile.imageGenerationModel,
@@ -444,6 +503,7 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
     return {
       ...profile,
       provider: customProvider.id,
+      usage: undefined,
       baseUrl: savedDraft?.baseUrl ?? (shouldUseOpenAIDefaults ? DEFAULT_BASE_URL : profile.baseUrl || DEFAULT_BASE_URL),
       model: savedDraft?.model ?? (shouldUseOpenAIDefaults ? DEFAULT_IMAGES_MODEL : profile.model || DEFAULT_IMAGES_MODEL),
       imageGenerationModel: savedDraft?.imageGenerationModel ?? profile.imageGenerationModel,
@@ -470,6 +530,7 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
   return {
     ...profile,
     provider,
+    usage: provider === 'openai' ? savedDraft?.usage ?? (profile.provider === 'openai' ? profile.usage : undefined) : undefined,
     baseUrl: savedDraft?.baseUrl ?? DEFAULT_BASE_URL,
     model: savedDraft?.model ?? DEFAULT_IMAGES_MODEL,
     imageGenerationModel: savedDraft?.imageGenerationModel ?? profile.imageGenerationModel,
@@ -520,6 +581,12 @@ function normalizeProviderDraft(
     transparentBackgroundMethod: !nativeTransparentBackgroundUnavailable && (input.transparentBackgroundMethod === 'api' || input.transparentBackgroundMethod === 'local')
       ? input.transparentBackgroundMethod
       : fallback.transparentBackgroundMethod,
+    usage: provider === 'openai' ? normalizeProfileUsage(input.usage, {
+      ...fallback,
+      apiMode: apiMode ?? fallback.apiMode,
+      model: model ?? fallback.model,
+      imageGenerationModel,
+    }) : undefined,
   }
 }
 
@@ -558,7 +625,7 @@ export function normalizeApiProfile(
     : false
   const nativeTransparentBackgroundUnavailable = customProviderIds.has(provider) && !nativeTransparentProviderIds.has(provider)
 
-  return {
+  const normalizedProfile: ApiProfile = {
     ...defaults,
     id: typeof record.id === 'string' && record.id.trim() ? record.id : defaults.id,
     isDefault: typeof record.isDefault === 'boolean' ? record.isDefault : undefined,
@@ -584,6 +651,8 @@ export function normalizeApiProfile(
       : defaults.transparentBackgroundMethod,
     providerDrafts: normalizeProviderDrafts(record.providerDrafts, customProviderIds, nativeTransparentProviderIds),
   }
+  normalizedProfile.usage = provider === 'openai' ? normalizeProfileUsage(record.usage, normalizedProfile) : undefined
+  return normalizedProfile
 }
 
 function validateImportedProfileRecord(input: unknown) {
@@ -697,21 +766,27 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     ? record.activeProfileId
     : profiles[0].id
   const active = profiles.find((p) => p.id === activeProfileId) ?? profiles[0]
-  const agentApiConfigMode = normalizeAgentApiConfigMode(record.agentApiConfigMode)
+  const agentApiConfigMode = active.usage
+    ? active.usage.agent?.mode ?? 'hybrid'
+    : normalizeAgentApiConfigMode(record.agentApiConfigMode)
   const firstAgentTextProfile = profiles.find(isAgentTextApiProfile)
-  const agentTextProfileId = typeof record.agentTextProfileId === 'string' && profiles.some((p) => p.id === record.agentTextProfileId && isAgentTextApiProfile(p))
+  const agentTextProfileId = active.usage && active.provider === 'openai'
+    ? active.id
+    : typeof record.agentTextProfileId === 'string' && profiles.some((p) => p.id === record.agentTextProfileId && isAgentTextApiProfile(p))
     ? record.agentTextProfileId
     : (isAgentTextApiProfile(active) ? active.id : firstAgentTextProfile?.id ?? null)
-  const agentImageProfileId = typeof record.agentImageProfileId === 'string' && profiles.some((p) => p.id === record.agentImageProfileId)
+  const agentImageProfileId = active.usage
+    ? active.id
+    : typeof record.agentImageProfileId === 'string' && profiles.some((p) => p.id === record.agentImageProfileId)
     ? record.agentImageProfileId
     : active.id
 
   return {
     baseUrl: active.baseUrl,
     apiKey: active.apiKey,
-    model: active.model,
+    model: active.usage ? resolveServiceGalleryProfile(active).model : active.model,
     timeout: active.timeout,
-    apiMode: active.apiMode,
+    apiMode: active.usage?.gallery?.apiMode ?? active.apiMode,
     codexCli: active.codexCli,
     apiProxy: active.apiProxy,
     streamImages: active.streamImages,
@@ -724,7 +799,8 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     alwaysShowRetryButton: typeof record.alwaysShowRetryButton === 'boolean' ? record.alwaysShowRetryButton : false,
     allowPromptRewrite: typeof record.allowPromptRewrite === 'boolean' ? record.allowPromptRewrite : false,
     taskCompletionNotification: typeof record.taskCompletionNotification === 'boolean' ? record.taskCompletionNotification : false,
-    enterSubmit: typeof record.enterSubmit === 'boolean' ? record.enterSubmit : false,
+    // Retained for backup compatibility; submission shortcuts are now fixed.
+    enterSubmit: true,
     zipDownloadRoutes: normalizeZipDownloadRoutes(record.zipDownloadRoutes),
     agentScrollToBottomAfterSubmit: typeof record.agentScrollToBottomAfterSubmit === 'boolean' ? record.agentScrollToBottomAfterSubmit : true,
     agentMaxToolRounds: normalizeAgentMaxToolRounds(record.agentMaxToolRounds),
@@ -740,14 +816,39 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
 
 export function getAgentTextApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
   const normalized = normalizeSettings(settings)
-  if (normalized.agentApiConfigMode === 'off') return getActiveApiProfile(normalized)
-  return normalized.profiles.find((profile) => profile.id === normalized.agentTextProfileId) ?? null
+  const active = normalized.profiles.find((profile) => profile.id === normalized.activeProfileId) ?? normalized.profiles[0]
+  if (active.usage) {
+    if (active.provider !== 'openai' || normalized.agentApiConfigMode === 'off') return null
+    return {
+      ...active,
+      usage: undefined,
+      apiMode: 'responses',
+      model: getServiceTextModel(active),
+      imageGenerationModel: getServiceImageModel(active, 'agent'),
+    }
+  }
+  const selected = normalized.profiles.find((profile) => profile.id === normalized.agentTextProfileId)
+  if (normalized.agentApiConfigMode === 'off') {
+    const profile = getActiveApiProfile(settings)
+    return profile.provider === 'openai' && profile.apiMode === 'responses' ? profile : null
+  }
+  return selected && isAgentTextApiProfile(selected)
+    ? (selected.usage ? { ...selected, usage: undefined, apiMode: 'responses', model: getServiceTextModel(selected), imageGenerationModel: getServiceImageModel(selected, 'agent') } : selected)
+    : null
 }
 
 export function getAgentImageApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
   const normalized = normalizeSettings(settings)
+  const active = normalized.profiles.find((profile) => profile.id === normalized.activeProfileId) ?? normalized.profiles[0]
+  if (active.usage) {
+    if (active.provider !== 'openai' || normalized.agentApiConfigMode === 'off') return null
+    if (normalized.agentApiConfigMode !== 'hybrid') return getAgentTextApiProfile(settings)
+    const model = getServiceImageModel(active, 'agent')
+    return { ...active, usage: undefined, apiMode: 'images', model, imageGenerationModel: model }
+  }
   if (normalized.agentApiConfigMode !== 'hybrid') return getAgentTextApiProfile(normalized)
-  return normalized.profiles.find((profile) => profile.id === normalized.agentImageProfileId) ?? null
+  const selected = normalized.profiles.find((profile) => profile.id === normalized.agentImageProfileId)
+  return selected?.usage ? resolveServiceGalleryProfile(selected) : selected ?? null
 }
 
 export function getCustomProviderDefinition(settings: Partial<AppSettings> | unknown, provider: ApiProvider): CustomProviderDefinition | null {
@@ -872,6 +973,8 @@ export function getActiveApiProfile(settings: Partial<AppSettings> | unknown): A
   const record = settings && typeof settings === 'object' ? settings as Record<string, unknown> : {}
   const normalized = normalizeSettings(settings)
   const profile = normalized.profiles.find((p) => p.id === normalized.activeProfileId) ?? normalized.profiles[0] ?? createDefaultOpenAIProfile()
+  // Unified services keep connection fields in the profile, not stale legacy top-level mirrors.
+  if (profile.usage) return profile
   const apiMode = profile.provider === 'openai' && (record.apiMode === 'images' || record.apiMode === 'responses')
     ? record.apiMode
     : profile.apiMode
@@ -888,6 +991,67 @@ export function getActiveApiProfile(settings: Partial<AppSettings> | unknown): A
     streamImages: profile.provider === 'openai' && typeof record.streamImages === 'boolean' ? record.streamImages : profile.streamImages,
     streamPartialImages: normalizeStreamPartialImages(record.streamPartialImages, profile.streamPartialImages),
   }
+}
+
+/** 返回当前总配置的画廊视图。连接信息仍来自同一个 Profile，画廊模型/协议只来自 usage.gallery。 */
+export function getGalleryApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile {
+  const profile = getActiveApiProfile(settings)
+  return profile.usage ? resolveServiceGalleryProfile(profile) : profile
+}
+
+function hasSameServiceConnection(left: ApiProfile, right: ApiProfile): boolean {
+  return left.provider === right.provider
+    && left.baseUrl.trim().replace(/\/+$/, '').toLowerCase() === right.baseUrl.trim().replace(/\/+$/, '').toLowerCase()
+    && left.apiKey.trim() === right.apiKey.trim()
+    && left.apiProxy === right.apiProxy
+}
+
+/**
+ * Explicit, idempotent upgrade. Profiles and credentials are never merged or deleted.
+ * A legacy Agent that genuinely uses another connection stays legacy until the user
+ * chooses to unify it; otherwise changing UI structure would silently change its key.
+ */
+export function migrateSettingsToServiceConfig(settings: Partial<AppSettings> | unknown): AppSettings {
+  const normalized = normalizeSettings(settings)
+  const active = normalized.profiles.find((profile) => profile.id === normalized.activeProfileId) ?? normalized.profiles[0]
+  const legacyText = normalized.profiles.find((profile) => profile.id === normalized.agentTextProfileId)
+  const legacyImage = normalized.profiles.find((profile) => profile.id === normalized.agentImageProfileId)
+  const usesLegacyAgent = !active.usage && normalized.agentApiConfigMode !== 'off'
+  const activeNeedsCrossConnection = usesLegacyAgent && (
+    (legacyText && !hasSameServiceConnection(active, legacyText))
+    || (normalized.agentApiConfigMode === 'hybrid' && legacyImage && !hasSameServiceConnection(active, legacyImage))
+  )
+  const profiles = normalized.profiles.map((profile): ApiProfile => {
+    if (profile.usage || profile.provider !== 'openai' || (profile.id === active.id && activeNeedsCrossConnection)) return profile
+    const galleryModel = profile.apiMode === 'responses'
+      ? profile.imageGenerationModel?.trim() || DEFAULT_IMAGES_MODEL
+      : profile.model.trim() || DEFAULT_IMAGES_MODEL
+    const text = profile.id === active.id && usesLegacyAgent && legacyText && hasSameServiceConnection(profile, legacyText)
+      ? legacyText
+      : profile.apiMode === 'responses' ? profile : normalized.profiles.find((candidate) => candidate.apiMode === 'responses' && hasSameServiceConnection(profile, candidate))
+    const legacyAgentImage = normalized.agentApiConfigMode === 'native' ? legacyText : legacyImage
+    const image = profile.id === active.id && usesLegacyAgent && legacyAgentImage && hasSameServiceConnection(profile, legacyAgentImage)
+      ? legacyAgentImage
+      : profile
+    const imageModel = image.usage?.agent?.imageModel?.trim()
+      || image.usage?.gallery?.model?.trim()
+      || (image.apiMode === 'responses' ? image.imageGenerationModel?.trim() : image.model.trim())
+      || galleryModel
+    return {
+      ...profile,
+      usage: {
+        // Old Responses profiles were often duplicated only to enable Agent.
+        // The simplified gallery defaults to the direct Images route; its model is preserved.
+        gallery: { apiMode: 'images', model: galleryModel },
+        agent: {
+          mode: profile.id === active.id && normalized.agentApiConfigMode === 'native' ? 'native' : 'hybrid',
+          textModel: text ? getServiceTextModel(text) : DEFAULT_RESPONSES_MODEL,
+          imageModel,
+        },
+      },
+    }
+  })
+  return normalizeSettings({ ...normalized, profiles })
 }
 
 export function validateApiProfile(profile: ApiProfile): string | null {
@@ -1109,6 +1273,7 @@ const PRESET_PROFILE_DEPLOYMENT_KEYS = [
   'streamPartialImages',
   'transparentBackgroundMethod',
   'providerDrafts',
+  'usage',
 ] as const
 
 function getPresetDeploymentFields(input: unknown, id: string, source: object) {
@@ -1124,6 +1289,42 @@ function mergePresetProfileSnapshot(previous: ApiProfile, imported: ApiProfile, 
     if (fields.has(key)) Object.assign(patch, { [key]: imported[key] })
   }
   return { ...previous, ...patch, id: imported.id, isDefault: imported.isDefault }
+}
+
+function mergePresetUsage(previous: ApiProfileUsage | undefined, current: ApiProfileUsage | undefined, imported: ApiProfileUsage | undefined): ApiProfileUsage | undefined {
+  if (!current || JSON.stringify(current) === JSON.stringify(previous)) return imported
+  if (!imported) return current
+  const mergeSection = <T extends object>(before: T | undefined, local: T | undefined, next: T | undefined): T | undefined => {
+    if (!local || JSON.stringify(local) === JSON.stringify(before)) return next
+    const merged = { ...local }
+    for (const key of new Set([...Object.keys(before ?? {}), ...Object.keys(next ?? {})]) as Set<keyof T>) {
+      if (JSON.stringify(local[key]) === JSON.stringify(before?.[key])) {
+        if (next?.[key] === undefined) delete merged[key]
+        else merged[key] = next[key]
+      }
+    }
+    return merged
+  }
+  return {
+    gallery: mergeSection(previous?.gallery, current.gallery, imported.gallery),
+    agent: mergeSection(previous?.agent, current.agent, imported.agent),
+  }
+}
+
+function preserveLegacyPresetModelChanges(previous: ApiProfile, current: ApiProfile, imported: ApiProfileUsage | undefined): ApiProfileUsage | undefined {
+  if (!imported || previous.usage || current.usage) return imported
+  const previousImage = previous.apiMode === 'responses' ? previous.imageGenerationModel?.trim() : previous.model.trim()
+  const currentImage = current.apiMode === 'responses' ? current.imageGenerationModel?.trim() : current.model.trim()
+  const imageWasChanged = Boolean(currentImage) && currentImage !== previousImage
+  const textWasChanged = current.apiMode === 'responses' && current.model.trim() !== previous.model.trim()
+  return {
+    gallery: { ...imported.gallery, ...(imageWasChanged ? { model: currentImage } : {}) },
+    agent: {
+      ...imported.agent,
+      ...(imageWasChanged ? { imageModel: currentImage } : {}),
+      ...(textWasChanged ? { textModel: current.model.trim() } : {}),
+    },
+  }
 }
 
 export function mergePresetImportedSettings(
@@ -1197,10 +1398,15 @@ export function mergePresetImportedSettings(
       : normalizedProfile
     if (!matched) return importedProfile
     if (options.lockPresetParams) return { ...importedProfile, apiKey: matched.apiKey }
-    if (!previous) return { ...matched, baseUrl: importedProfile.baseUrl, isDefault: importedProfile.isDefault }
+    if (!previous) return { ...matched, usage: matched.usage ?? importedProfile.usage, baseUrl: importedProfile.baseUrl, isDefault: importedProfile.isDefault }
 
     const changed: Partial<ApiProfile> = {}
     for (const key of PRESET_PROFILE_DEPLOYMENT_KEYS) {
+      if (key === 'usage') {
+        if (fields.has('usage')) changed.usage = preserveLegacyPresetModelChanges(previous, matched,
+          mergePresetUsage(previous.usage, matched.usage, importedProfile.usage))
+        continue
+      }
       if (JSON.stringify(importedProfile[key]) !== JSON.stringify(previous[key])) {
         Object.assign(changed, { [key]: importedProfile[key] })
       }
@@ -1281,12 +1487,13 @@ export const DEFAULT_SETTINGS: AppSettings = normalizeSettings({
   alwaysShowRetryButton: false,
   allowPromptRewrite: false,
   taskCompletionNotification: false,
-  enterSubmit: false,
+  enterSubmit: true,
   zipDownloadRoutes: DEFAULT_ZIP_DOWNLOAD_ROUTES,
   agentScrollToBottomAfterSubmit: true,
   agentMaxToolRounds: DEFAULT_AGENT_MAX_TOOL_ROUNDS,
   agentWebSearch: false,
   agentMathFormattingPrompt: true,
+  // 旧版无预置配置时保持关闭；部署的总服务配置可通过 preset agent 字段默认启用混合模式。
   agentApiConfigMode: 'off',
   agentTextProfileId: null,
   agentImageProfileId: null,

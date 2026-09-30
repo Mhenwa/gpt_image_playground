@@ -136,7 +136,7 @@ import { callImageApi } from './lib/api'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, reuseConfig, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
+import { clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, retryTask, reuseConfig, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
 
 const commitTaskDeletionImplementation = vi.mocked(commitTaskDeletion).getMockImplementation()!
 const deleteDbImageImplementation = vi.mocked(deleteDbImage).getMockImplementation()!
@@ -145,6 +145,145 @@ const callBatchImageSingleImplementation = vi.mocked(callBatchImageSingle).getMo
 
 const imageA = { id: 'image-a', dataUrl: 'data:image/png;base64,a' }
 const imageB = { id: 'image-b', dataUrl: 'data:image/png;base64,b' }
+
+describe('unified service submission', () => {
+  const profile = createDefaultOpenAIProfile({
+    id: 'unified-service', name: 'Shared service', apiKey: 'shared-test-key',
+    baseUrl: 'https://shared.example.test/v1', streamImages: false,
+    usage: {
+      gallery: { apiMode: 'responses', model: 'gallery-image' },
+      agent: { mode: 'hybrid', textModel: 'chat-model', imageModel: 'agent-image' },
+    },
+  })
+
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    await clearAgentConversations()
+    vi.mocked(callImageApi).mockReset().mockResolvedValue({ images: ['data:image/png;base64,1024x1024'], actualParams: {}, actualParamsList: [], revisedPrompts: [] })
+    vi.mocked(callAgentResponsesApi).mockReset()
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id }),
+      prompt: '你好', appMode: 'agent', inputImages: [], maskDraft: null, params: { ...DEFAULT_PARAMS },
+      tasks: [], agentConversations: [agentConversation()], activeAgentConversationId: 'conversation-a',
+      agentEditingRoundId: null, reusedTaskApiProfileId: null, reusedTaskApiProfileMissing: false,
+      streamPreviews: {}, streamPreviewSlots: {}, showToast: vi.fn(),
+    })
+  })
+
+  it('sends plain chat using the text model without submitting an image task', async () => {
+    vi.mocked(callAgentResponsesApi).mockResolvedValue({ text: '你好', images: [], outputItems: [] })
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(callAgentResponsesApi).toHaveBeenCalledTimes(1))
+    const request = vi.mocked(callAgentResponsesApi).mock.calls[0][0]
+    expect(request.profile).toMatchObject({ model: 'chat-model', apiMode: 'responses', apiKey: 'shared-test-key' })
+    expect(request.imageProfile).toMatchObject({ model: 'agent-image', apiMode: 'images' })
+    expect(request.settings).toMatchObject({ model: 'chat-model', apiMode: 'responses', agentApiConfigMode: 'hybrid' })
+    expect(callImageApi).not.toHaveBeenCalled()
+    expect(useStore.getState().tasks).toEqual([])
+  })
+
+  it('executes a mixed-mode image function with the Agent image model, not the Responses gallery defaults', async () => {
+    vi.mocked(callAgentResponsesApi)
+      .mockResolvedValueOnce({ text: '', images: [], outputItems: [{ type: 'function_call', name: 'generate_image', call_id: 'call-image', arguments: JSON.stringify({ id: 'image-one', prompt: 'A cat' }) }] })
+      .mockResolvedValue({ text: '已生成', images: [], outputItems: [] })
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledTimes(1))
+    const imageRequest = vi.mocked(callImageApi).mock.calls[0][0]
+    expect(imageRequest.settings).toMatchObject({ apiMode: 'images', model: 'agent-image', apiKey: 'shared-test-key' })
+    expect(imageRequest.settings.profiles.find((item) => item.id === profile.id)?.usage).toBeUndefined()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+    expect(useStore.getState().tasks[0]).toMatchObject({ apiMode: 'images', apiModel: 'agent-image' })
+    expect(useStore.getState().settings.profiles[0].usage?.gallery?.model).toBe('gallery-image')
+  })
+
+  it('uses default hidden Agent params for mixed-mode image calls without clearing Gallery compression or rewriting history', async () => {
+    const historic = task({
+      id: 'historic-compression',
+      params: { ...DEFAULT_PARAMS, output_format: 'jpeg', output_compression: 35, moderation: 'low' },
+      actualParams: { output_compression: 40, moderation: 'low' },
+    })
+    useStore.setState({ params: { ...historic.params }, tasks: [historic] })
+    vi.mocked(callAgentResponsesApi)
+      .mockResolvedValueOnce({ text: '', images: [], outputItems: [{ type: 'function_call', name: 'generate_image', call_id: 'call-hidden-params', arguments: JSON.stringify({ id: 'image-one', prompt: 'A cat' }) }] })
+      .mockResolvedValue({ text: '已生成', images: [], outputItems: [] })
+
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(callAgentResponsesApi).mock.calls[0][0].params).toMatchObject({ moderation: 'auto', output_compression: null })
+    expect(vi.mocked(callImageApi).mock.calls[0][0].params).toMatchObject({ moderation: 'auto', output_compression: null, output_format: 'jpeg' })
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+    expect(useStore.getState().tasks[0].params).toMatchObject({ moderation: 'auto', output_compression: null })
+    expect(useStore.getState().params.output_compression).toBe(35)
+    expect(useStore.getState().tasks.find((item) => item.id === historic.id)).toMatchObject({
+      params: { output_compression: 35, moderation: 'low' },
+      actualParams: { output_compression: 40, moderation: 'low' },
+    })
+  })
+
+  it('uses default hidden Agent params for native Responses image tools', async () => {
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [{ ...profile, usage: { ...profile.usage, agent: { ...profile.usage?.agent, mode: 'native' } } }], activeProfileId: profile.id }),
+      params: { ...DEFAULT_PARAMS, output_format: 'webp', output_compression: 35, moderation: 'low' },
+    })
+    vi.mocked(callAgentResponsesApi).mockResolvedValue({ text: '你好', images: [], outputItems: [] })
+
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(callAgentResponsesApi).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(callAgentResponsesApi).mock.calls[0][0].params).toMatchObject({ moderation: 'auto', output_compression: null, output_format: 'webp' })
+    expect(useStore.getState().params.output_compression).toBe(35)
+  })
+
+  it('retains Gallery JPEG compression while submitting default moderation', async () => {
+    useStore.setState({
+      appMode: 'gallery',
+      params: { ...DEFAULT_PARAMS, output_format: 'jpeg', output_compression: 35, moderation: 'low' },
+    })
+
+    await submitTask()
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(callImageApi).mock.calls[0][0].params).toMatchObject({ moderation: 'auto', output_compression: 35, output_format: 'jpeg' })
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+    expect(useStore.getState().tasks[0].params).toMatchObject({ moderation: 'auto', output_compression: 35 })
+  })
+
+  it.each(['agent', 'gallery'] as const)('uses %s defaults when retrying an old JPEG task without rewriting its metadata', async (sourceMode) => {
+    const historic = task({
+      id: 'historic-retry',
+      sourceMode,
+      status: 'error',
+      params: { ...DEFAULT_PARAMS, output_format: 'jpeg', output_compression: 35, moderation: 'low' },
+      actualParams: { output_compression: 40, moderation: 'low' },
+    })
+    useStore.setState({ tasks: [historic] })
+
+    await retryTask(historic)
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledTimes(1))
+    const output_compression = sourceMode === 'agent' ? null : 35
+    expect(vi.mocked(callImageApi).mock.calls[0][0].params).toMatchObject({ moderation: 'auto', output_compression, output_format: 'jpeg' })
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+    expect(useStore.getState().tasks[0].params).toMatchObject({ moderation: 'auto', output_compression })
+    expect(useStore.getState().tasks.find((item) => item.id === historic.id)).toMatchObject({
+      params: { output_compression: 35, moderation: 'low' },
+      actualParams: { output_compression: 40, moderation: 'low' },
+    })
+  })
+
+  it('retains the submitted model/protocol for queued image tasks after defaults change', () => {
+    const resolved = getTaskApiProfile(useStore.getState().settings, task({ apiProfileId: profile.id, apiMode: 'images', apiModel: 'submitted-image' }))
+    expect(resolved).toMatchObject({ apiMode: 'images', model: 'submitted-image', apiKey: 'shared-test-key' })
+    expect(resolved?.usage).toBeUndefined()
+  })
+
+  it.each(['hybrid', 'off'] as const)('recovers a native task with a text mainline even after Agent is changed to %s', (mode) => {
+    const updated = { ...profile, usage: { ...profile.usage, agent: { ...profile.usage?.agent, mode } } }
+    const settings = normalizeSettings({ profiles: [updated], activeProfileId: profile.id })
+    const historic = task({ apiProfileId: profile.id, agentConversationId: 'conversation-a', apiMode: 'responses', apiModel: 'submitted-image', apiResponsesModel: 'submitted-chat' })
+    expect(getTaskApiProfile(settings, historic)).toMatchObject({ apiMode: 'responses', model: 'submitted-chat', imageGenerationModel: 'submitted-image' })
+    expect(getTaskApiProfile(settings, { ...historic, apiResponsesModel: undefined })).toMatchObject({ apiMode: 'responses', model: 'chat-model', imageGenerationModel: 'submitted-image' })
+    expect(settings.profiles[0].usage?.agent?.mode).toBe(mode)
+  })
+})
 
 describe('error toast messages', () => {
   it('drops long error detail after the failure title', () => {
@@ -1721,9 +1860,16 @@ describe('fal task recovery', () => {
 describe('agent conversation creation', () => {
   beforeEach(() => {
     useStore.setState({
+      appMode: 'agent',
+      prompt: '',
+      inputImages: [],
+      maskDraft: null,
+      maskEditorImageId: null,
+      agentInputDrafts: {},
       agentConversations: [],
       activeAgentConversationId: null,
       agentSidebarCollapsed: false,
+      agentMobileSidebarOpen: false,
       agentEditingRoundId: null,
     })
   })
@@ -1750,9 +1896,66 @@ describe('agent conversation creation', () => {
       updatedAt: 3_000,
     })
     expect(state.agentConversations.find((item) => item.id === olderEmpty.id)).toEqual(olderEmpty)
-    expect(state.agentSidebarCollapsed).toBe(true)
+    expect(state.agentSidebarCollapsed).toBe(false)
+    expect(state.agentMobileSidebarOpen).toBe(false)
     expect(state.agentEditingRoundId).toBeNull()
     now.mockRestore()
+  })
+
+  it('preserves an unsent active draft and starts a blank conversation', () => {
+    const latestEmpty = agentConversation({ id: 'latest-empty', createdAt: 2_000, updatedAt: 2_000 })
+    useStore.setState({
+      agentConversations: [latestEmpty],
+      activeAgentConversationId: latestEmpty.id,
+      prompt: '还没有发送的内容',
+      inputImages: [{ id: 'draft-image', dataUrl: 'data:image/png;base64,draft' }],
+    })
+
+    const id = useStore.getState().createAgentConversation()
+
+    const state = useStore.getState()
+    expect(id).not.toBe(latestEmpty.id)
+    expect(state.agentConversations).toHaveLength(2)
+    expect(state.activeAgentConversationId).toBe(id)
+    expect(state.prompt).toBe('')
+    expect(state.inputImages).toEqual([])
+    expect(state.agentInputDrafts[latestEmpty.id]).toMatchObject({
+      prompt: '还没有发送的内容',
+      inputImages: [{ id: 'draft-image' }],
+    })
+  })
+
+  it.each([false, true])('preserves desktop collapse %s and closes the mobile drawer after creating or selecting a chat', (collapsed) => {
+    const current = agentConversation({ id: 'current', createdAt: 1, updatedAt: 1 })
+    useStore.setState({
+      agentConversations: [current], activeAgentConversationId: current.id,
+      agentSidebarCollapsed: collapsed, agentMobileSidebarOpen: true,
+    })
+    const id = useStore.getState().createAgentConversation()
+    expect(useStore.getState().agentSidebarCollapsed).toBe(collapsed)
+    expect(useStore.getState().agentMobileSidebarOpen).toBe(false)
+    useStore.getState().setAgentMobileSidebarOpen(true)
+    useStore.getState().setActiveAgentConversationId(id)
+    expect(useStore.getState().agentSidebarCollapsed).toBe(collapsed)
+    expect(useStore.getState().agentMobileSidebarOpen).toBe(false)
+  })
+
+  it('does not reuse an inactive empty conversation with a saved draft', () => {
+    const olderEmpty = agentConversation({ id: 'older-empty', createdAt: 1_000, updatedAt: 1_000 })
+    const latestEmpty = agentConversation({ id: 'latest-empty', createdAt: 2_000, updatedAt: 2_000 })
+    useStore.setState({
+      agentConversations: [olderEmpty, latestEmpty],
+      activeAgentConversationId: olderEmpty.id,
+      agentInputDrafts: {
+        [latestEmpty.id]: { prompt: '保留草稿', inputImages: [], maskDraft: null, maskEditorImageId: null },
+      },
+    })
+
+    const id = useStore.getState().createAgentConversation()
+
+    expect(id).not.toBe(latestEmpty.id)
+    expect(useStore.getState().prompt).toBe('')
+    expect(useStore.getState().agentInputDrafts[latestEmpty.id].prompt).toBe('保留草稿')
   })
 
   it('creates a new conversation when the latest conversation has messages', () => {
@@ -5072,6 +5275,15 @@ describe('agent assistant regeneration', () => {
       inputImageIds: [imageA.id],
     }))
     expect(useStore.getState().agentEditingRoundId).toBeNull()
+  })
+
+  it('resets hidden params for Agent regeneration but preserves shared Gallery compression', async () => {
+    useStore.setState({ params: { ...DEFAULT_PARAMS, output_format: 'jpeg', output_compression: 35, moderation: 'low' } })
+
+    await regenerateAgentAssistantMessage('conversation-a', 'round-a')
+    await vi.waitFor(() => expect(callAgentResponsesApi).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(callAgentResponsesApi).mock.calls[0][0].params).toMatchObject({ moderation: 'auto', output_compression: null, output_format: 'jpeg' })
+    expect(useStore.getState().params.output_compression).toBe(35)
   })
 
   it('overwrites the same round when regenerating an error assistant message', async () => {

@@ -1,7 +1,7 @@
-import { useEffect } from 'react'
+import { useEffect, type CSSProperties } from 'react'
 import { initStore, restoreExplicitPresetConfig, useStore } from './store'
 import { buildSettingsFromUrlParams, clearUrlSettingParams, getExplicitUrlSettingsIds, hasUrlSettingParams } from './lib/urlSettings'
-import { createDefaultOpenAIProfile, hasDefaultPresetConfig, isAgentTextApiProfile, normalizeSettings } from './lib/apiProfiles'
+import { createDefaultOpenAIProfile, hasDefaultPresetConfig, isAgentTextApiProfile, migrateSettingsToServiceConfig, normalizeSettings } from './lib/apiProfiles'
 import { getCustomProviderConfigUrl, hasEmbeddedDefaultConfig, loadCustomProviderSettingsFromUrl, loadEmbeddedDefaultConfig } from './lib/customProviderConfigUrl'
 import { getDefaultPresetProfileId, getPresetProfileIds, isPresetConfigOnlyEnabled, setPresetConfig } from './lib/presetConfig'
 import { useDockerApiUrlMigrationNotice } from './hooks/useDockerApiUrlMigrationNotice'
@@ -26,6 +26,7 @@ let defaultConfigImportStarted = false
 
 export default function App() {
   const appMode = useStore((s) => s.appMode)
+  const sidebarCollapsed = useStore((s) => s.agentSidebarCollapsed)
   const filterFavorite = useStore((s) => s.filterFavorite)
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
   useDockerApiUrlMigrationNotice()
@@ -109,7 +110,7 @@ export default function App() {
                 : defaultPresetId ?? [...presetIds][0],
             })
           : current.settings
-        current.setSettings(await applyUrlSettings(settings))
+        current.setSettings(migrateSettingsToServiceConfig(await applyUrlSettings(settings)))
         clearAppliedUrlSettings()
       })
       .catch((error) => {
@@ -117,7 +118,7 @@ export default function App() {
         setPresetConfig(null)
         const state = useStore.getState()
         void applyUrlSettings(state.settings).then((settings) => {
-          useStore.getState().setSettings(settings)
+          useStore.getState().setSettings(migrateSettingsToServiceConfig(settings))
           clearAppliedUrlSettings()
         })
       })
@@ -135,7 +136,7 @@ export default function App() {
   }, [])
 
   return (
-    <>
+    <div className={appMode === 'agent' ? 'agent-app' : undefined} style={appMode === 'agent' ? { '--agent-sidebar-width': sidebarCollapsed ? '64px' : '264px' } as CSSProperties : undefined}>
       <Header />
       {appMode === 'agent' ? (
         <AgentWorkspace />
@@ -158,6 +159,6 @@ export default function App() {
       <Toast />
       <MaskEditorModal />
       <ImageContextMenu />
-    </>
+    </div>
   )
 }

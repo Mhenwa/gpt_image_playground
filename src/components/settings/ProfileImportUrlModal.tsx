@@ -50,6 +50,7 @@ export default function ProfileImportUrlModal({
         </h3>
         <div className="text-[13px] text-gray-500 dark:text-gray-400 mb-5 leading-relaxed">
           是否包含 API Key？如果选择「不包含」，可额外配置是否使用 New API 变量。
+          <p className="mt-2 text-xs">此链接分享当前画廊的连接、协议和模型，不包含 Agent 用途配置。需要完整保留三类配置时，请使用“数据管理 → 导出配置”。</p>
         </div>
 
         <div className="mb-6 rounded-2xl bg-gray-50/80 p-4 dark:bg-white/[0.03] ring-1 ring-black/5 dark:ring-white/5">

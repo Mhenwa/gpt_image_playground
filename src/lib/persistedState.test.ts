@@ -58,6 +58,17 @@ function fallback() {
 }
 
 describe('persisted state codec', () => {
+  it('opens the new desktop sidebar once when upgrading the old drawer layout', () => {
+    expect(normalizePersistedState({ agentSidebarCollapsed: true }, fallback())!.state.agentSidebarCollapsed).toBe(false)
+  })
+
+  it.each([false, true])('retains the new desktop sidebar preference %s without persisting the mobile drawer', (collapsed) => {
+    const persisted = createPersistedState({ ...source(), agentSidebarCollapsed: collapsed })
+    expect(persisted.agentSidebarLayoutVersion).toBe(1)
+    expect(persisted).not.toHaveProperty('agentMobileSidebarOpen')
+    expect(normalizePersistedState(persisted, fallback())!.state.agentSidebarCollapsed).toBe(collapsed)
+  })
+
   it.each([undefined, 'custom-image-model', '', '   '])('restores profile and legacy top-level tool model %s without autofilling', (imageGenerationModel) => {
     const profile = { apiMode: 'responses', model: 'legacy-text-model', ...(imageGenerationModel === undefined ? {} : { imageGenerationModel }) }
     for (const settings of [profile, { profiles: [profile] }]) {

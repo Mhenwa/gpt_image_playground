@@ -3,7 +3,10 @@ import { createPortal } from 'react-dom'
 import { deleteFavoriteCollection, useStore, submitTask, submitAgentMessage, stopAgentResponse, addImageFromFile, removeMultipleTasks, taskMatchesFilterStatus, taskMatchesSearchQuery } from '../store'
 import { DEFAULT_PARAMS, type TaskRecord } from '../types'
 import { getActiveAgentRounds } from '../lib/agentConversationState'
-import { getActiveApiProfile, getAgentImageApiProfile, normalizeSettings } from '../lib/apiProfiles'
+import { getGalleryApiProfile, getAgentImageApiProfile, getAgentTextApiProfile } from '../lib/apiProfiles'
+import { createRequestSettingsForProfile } from '../lib/requestSettings'
+import { updateServiceModel } from '../lib/serviceModelSelection'
+import { getPromptEnterAction } from '../lib/promptKeyboard'
 import { getImageGenerationModel, isGptImage25Model } from '../lib/imageModels'
 import { ensureImageCached, getCachedImage } from '../lib/imageCache'
 import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSettings, normalizeParamsForSettings } from '../lib/paramCompatibility'
@@ -15,6 +18,8 @@ import { collectAgentRoundOutputImageSlots } from '../lib/agentImageReferences'
 import { ALL_FAVORITES_COLLECTION_ID, getTaskFavoriteCollectionIds } from '../lib/favoriteState'
 import { getContentEditableCursor, getContentEditablePlainText, getContentEditableSelection, getMentionTagHtml, setContentEditableCursor, setContentEditableSelection, syncMentionTagSelection } from '../lib/contentEditableMentions'
 import { useHintTooltip } from '../hooks/useHintTooltip'
+import useModelCatalog from '../hooks/useModelCatalog'
+import { isPresetProfileLocked } from '../lib/presetConfig'
 import { downloadImageEntriesAsZip, downloadImageIds, formatExportFileTime, getTaskOutputImageZipEntries } from '../lib/downloadImages'
 import SizePickerModal from './SizePickerModal'
 import { CloseIcon, CollapseIcon, ExpandIcon } from './icons'
@@ -94,6 +99,7 @@ export default function InputBar() {
   const params = useStore((s) => s.params)
   const setParams = useStore((s) => s.setParams)
   const settings = useStore((s) => s.settings)
+  const setSettings = useStore((s) => s.setSettings)
   const reusedTaskApiProfileId = useStore((s) => s.reusedTaskApiProfileId)
   const setShowSettings = useStore((s) => s.setShowSettings)
   const setLightboxImageId = useStore((s) => s.setLightboxImageId)
@@ -411,35 +417,68 @@ export default function InputBar() {
   const dragCounter = useRef(0)
   const isMobile = useIsMobile()
 
-  const settingsActiveProfile = useMemo(() => getActiveApiProfile(settings), [settings])
+  const settingsActiveProfile = useMemo(() => getGalleryApiProfile(settings), [settings])
+  const agentTextProfile = useMemo(() => (
+    appMode === 'agent' ? getAgentTextApiProfile(settings) : null
+  ), [appMode, settings])
+  const agentImageProfile = useMemo(() => (
+    appMode === 'agent' ? getAgentImageApiProfile(settings) : null
+  ), [appMode, settings])
   const currentActiveProfile = useMemo(() => (
     appMode === 'agent'
-      ? getAgentImageApiProfile(settings) ?? settingsActiveProfile
+      ? agentImageProfile ?? settingsActiveProfile
       : settingsActiveProfile
-  ), [appMode, settings, settingsActiveProfile])
+  ), [agentImageProfile, appMode, settingsActiveProfile])
   const activeProfile = useMemo(() => (
     appMode !== 'agent' && settings.reuseTaskApiProfileTemporarily && reusedTaskApiProfileId
-      ? settings.profiles.find((profile) => profile.id === reusedTaskApiProfileId) ?? currentActiveProfile
+      ? settings.profiles.some((profile) => profile.id === reusedTaskApiProfileId)
+        ? getGalleryApiProfile({ profiles: settings.profiles, customProviders: settings.customProviders, activeProfileId: reusedTaskApiProfileId })
+        : currentActiveProfile
       : currentActiveProfile
   ), [appMode, currentActiveProfile, reusedTaskApiProfileId, settings])
   const activeAgentConversation = appMode === 'agent'
     ? agentConversations.find((conversation) => conversation.id === activeAgentConversationId) ?? null
     : null
   const activeAgentIsRunning = Boolean(activeAgentConversation?.rounds.some((round) => round.status === 'running'))
-  const effectiveSettings = useMemo(() => (
-    activeProfile.id === settingsActiveProfile.id
-      ? settings
-      : normalizeSettings({ ...settings, activeProfileId: activeProfile.id })
-  ), [activeProfile.id, settingsActiveProfile.id, settings])
-  const hasSubmitApiConfig = Boolean(activeProfile.apiKey)
+  const effectiveSettings = useMemo(() => createRequestSettingsForProfile(settings, activeProfile), [activeProfile, settings])
+  // 画廊只需要一个当前生图配置；Agent 同时为文本模型和图像模型读取各自目录。
+  // 禁用的 catalog 仍调用 hook，避免因 appMode 切换破坏 React Hooks 顺序。
+  const modelCatalog = useModelCatalog(activeProfile, appMode !== 'agent')
+  const agentTextModelCatalog = useModelCatalog(agentTextProfile ?? activeProfile, appMode === 'agent')
+  const agentImageModelCatalog = useModelCatalog(agentImageProfile ?? activeProfile, appMode === 'agent')
+  const modelValue = getImageGenerationModel(activeProfile)
+  const handleModelChange = (model: string) => {
+    const current = useStore.getState().settings
+    setSettings({ profiles: current.profiles.map((profile) => profile.id === activeProfile.id ? updateServiceModel(profile, 'gallery', model) : profile) })
+  }
+  const updateAgentProfile = (profileId: string | undefined, purpose: 'agent-text' | 'agent-image', model: string) => {
+    if (!profileId) return
+    const current = useStore.getState().settings
+    setSettings({
+      profiles: current.profiles.map((profile) => profile.id === profileId ? updateServiceModel(profile, purpose, model) : profile),
+    })
+  }
+  const handleAgentTextModelChange = (model: string) => {
+    if (!agentTextProfile) return
+    updateAgentProfile(agentTextProfile.id, 'agent-text', model)
+  }
+  const handleAgentImageModelChange = (model: string) => {
+    if (!agentImageProfile) return
+    updateAgentProfile(agentImageProfile.id, 'agent-image', model)
+  }
+  const hasSubmitApiConfig = appMode === 'agent'
+    ? Boolean(agentTextProfile?.apiKey && agentImageProfile?.apiKey)
+    : Boolean(activeProfile.apiKey)
   const canSubmit = Boolean(prompt.trim() && hasSubmitApiConfig && !activeAgentIsRunning)
   const submitButtonAriaLabel = activeAgentIsRunning
     ? '停止生成'
     : hasSubmitApiConfig
-    ? maskDraft ? '遮罩编辑' : '生成图像'
+    ? appMode === 'agent' ? '发送消息' : maskDraft ? '遮罩编辑' : '生成图像'
     : '请先配置 API'
   const submitTooltipText = activeAgentIsRunning ? '停止生成' : '尚未完成 API 配置，请在右上角设置中进行'
-  const promptPlaceholder = '描述你想生成的图片，可输入 @ 来指定参考图...'
+  const promptPlaceholder = appMode === 'agent'
+    ? '输入消息，或描述你想生成/编辑的图片；可输入 @ 引用图片...'
+    : '描述你想生成的图片，可输入 @ 来指定参考图...'
   const submitCurrentMode = useCallback(() => {
     if (appMode === 'agent') {
       void submitAgentMessage()
@@ -462,7 +501,6 @@ export default function InputBar() {
   const activeProvider = activeProfile.provider
   const isFalProvider = activeProvider === 'fal'
   const agentAutoImageCount = appMode === 'agent'
-  const moderationDisabled = isFalProvider
   const transparentOutputAvailable = appMode === 'gallery'
   const showTransparentOutputControl = transparentOutputAvailable && (params.output_format === 'png' || params.output_format === 'webp')
   const transparentOutputEnabled = transparentOutputAvailable && showTransparentOutputControl && params.transparent_output
@@ -500,7 +538,6 @@ export default function InputBar() {
     if (open) transparentOutputHint.hide()
   }, [transparentOutputHint.hide])
   const compressionHint = useHintTooltip({ enabled: () => compressionDisabled })
-  const moderationHint = useHintTooltip({ enabled: () => moderationDisabled })
   const sizeHint = useHintTooltip({ enabled: () => isFalTextToImage || activeProfile.codexCli })
   const qualityHint = useHintTooltip({ enabled: () => activeProfile.codexCli || isFalProvider })
   const nLimitHint = useHintTooltip({ autoHideMs: 2000 })
@@ -839,9 +876,17 @@ export default function InputBar() {
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const enterAction = getPromptEnterAction({
+      key: e.key, shiftKey: e.shiftKey, altKey: e.altKey, repeat: e.repeat,
+      isComposing: e.nativeEvent.isComposing, keyCode: e.nativeEvent.keyCode,
+    }, isComposingRef.current)
     // 兼容某些输入法：用 Enter 确认候选字时会额外派发 Enter keydown，
     // 组字期间忽略该事件，避免重复插入或误触发提交/换行。
-    if (e.key === 'Enter' && (e.nativeEvent.isComposing || isComposingRef.current || e.nativeEvent.keyCode === 229)) {
+    if (enterAction === 'composition') {
+      return
+    }
+    if (enterAction === 'ignore') {
+      e.preventDefault()
       return
     }
 
@@ -873,20 +918,10 @@ export default function InputBar() {
     if (e.key === 'Enter') {
       e.preventDefault()
 
-      const isModifier = e.ctrlKey || e.metaKey
-
-      if (settings.enterSubmit) {
-        if (e.shiftKey) {
-          insertPromptTextAtSelection('\n')
-        } else if (!isModifier) {
-          if (canSubmit) submitCurrentMode()
-        }
-      } else {
-        if (isModifier) {
-          if (canSubmit) submitCurrentMode()
-        } else {
-          insertPromptTextAtSelection('\n')
-        }
+      if (enterAction === 'newline') {
+        insertPromptTextAtSelection('\n')
+      } else if (enterAction === 'submit' && canSubmit) {
+        submitCurrentMode()
       }
       return
     }
@@ -1522,6 +1557,19 @@ export default function InputBar() {
       params={params}
       setParams={setParams}
       activeProfile={activeProfile}
+      modelValue={modelValue}
+      modelCatalog={modelCatalog}
+      onModelChange={handleModelChange}
+      modelLocked={isPresetProfileLocked(activeProfile.id) || activeAgentIsRunning}
+      agentMode={appMode === 'agent'}
+      agentTextModelValue={agentTextProfile?.model ?? ''}
+      agentTextModelCatalog={agentTextModelCatalog}
+      onAgentTextModelChange={handleAgentTextModelChange}
+      agentTextModelLocked={!agentTextProfile || isPresetProfileLocked(agentTextProfile.id) || activeAgentIsRunning}
+      agentImageModelValue={agentImageProfile ? getImageGenerationModel(agentImageProfile) : ''}
+      agentImageModelCatalog={agentImageModelCatalog}
+      onAgentImageModelChange={handleAgentImageModelChange}
+      agentImageModelLocked={!agentImageProfile || isPresetProfileLocked(agentImageProfile.id) || activeAgentIsRunning}
       isFalProvider={isFalProvider}
       isFalTextToImage={isFalTextToImage}
       displaySize={displaySize}
@@ -1537,8 +1585,6 @@ export default function InputBar() {
       outputCompressionInput={outputCompressionInput}
       setOutputCompressionInput={setOutputCompressionInput}
       commitOutputCompression={commitOutputCompression}
-      moderationHint={moderationHint}
-      moderationDisabled={moderationDisabled}
       agentAutoImageCount={agentAutoImageCount}
       outputImageLimit={outputImageLimit}
       nInput={nInput}
@@ -1579,7 +1625,7 @@ export default function InputBar() {
 
       <div
         data-input-bar
-        className={`fixed bottom-4 sm:bottom-6 left-1/2 -translate-x-1/2 z-30 w-full max-w-4xl px-3 sm:px-4 transition-all duration-300${promptExpanded ? ' flex flex-col' : ''}`}
+        className={`${appMode === 'agent' ? 'agent-input-bar ' : ''}fixed bottom-4 sm:bottom-6 left-1/2 -translate-x-1/2 z-30 w-full max-w-4xl px-3 sm:px-4 transition-all duration-300${promptExpanded ? ' flex flex-col' : ''}`}
         style={promptExpanded ? { top: `${promptExpandedTop}px`, transitionProperty: 'none' } : undefined}
       >
         <InputBatchBars
@@ -1770,11 +1816,17 @@ export default function InputBar() {
             )}
           </div>
 
+          <div className="mt-1.5 hidden px-1 text-[10px] text-gray-400 dark:text-gray-500 sm:block">
+            Enter 发送 · Shift + Enter 换行
+          </div>
+
           {/* 参数 + 按钮 */}
           <div className="mt-3">
             {/* 桌面端布局 */}
             <div className="hidden sm:flex items-end justify-between gap-3">
-              {renderParams('grid-cols-6')}
+              {renderParams(appMode === 'agent'
+                ? 'grid-cols-3 lg:grid-cols-[minmax(160px,1.7fr)_minmax(160px,1.7fr)_repeat(4,minmax(0,1fr))]'
+                : 'grid-cols-3 lg:grid-cols-[minmax(160px,2fr)_repeat(5,minmax(0,1fr))]')}
 
               <div className="flex gap-2 flex-shrink-0 mb-0.5">
                 <div
@@ -1931,7 +1983,7 @@ export default function InputBar() {
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
                       </svg>
                     )}
-                    {activeAgentIsRunning ? '停止生成' : maskDraft ? '遮罩编辑' : '生成图像'}
+                    {activeAgentIsRunning ? '停止生成' : appMode === 'agent' ? '发送消息' : maskDraft ? '遮罩编辑' : '生成图像'}
                   </button>
                 </div>
               </div>

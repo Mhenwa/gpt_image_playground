@@ -2,6 +2,7 @@ import type { ApiProfile, TaskParams } from '../../types'
 import { dismissAllTooltips } from '../../lib/tooltipDismiss'
 import Select from '../Select'
 import ButtonTooltip from './buttonTooltip'
+import ModelPicker from './modelPicker'
 
 interface HintTooltipState {
   visible: boolean
@@ -16,6 +17,19 @@ export default function InputParamsPanel({
   params,
   setParams,
   activeProfile,
+  modelValue,
+  modelCatalog,
+  onModelChange,
+  modelLocked,
+  agentMode = false,
+  agentTextModelValue = '',
+  agentTextModelCatalog,
+  onAgentTextModelChange,
+  agentTextModelLocked = false,
+  agentImageModelValue = '',
+  agentImageModelCatalog,
+  onAgentImageModelChange,
+  agentImageModelLocked = false,
   isFalProvider,
   isFalTextToImage,
   displaySize,
@@ -31,8 +45,6 @@ export default function InputParamsPanel({
   outputCompressionInput,
   setOutputCompressionInput,
   commitOutputCompression,
-  moderationHint,
-  moderationDisabled,
   agentAutoImageCount,
   outputImageLimit,
   nInput,
@@ -56,6 +68,19 @@ export default function InputParamsPanel({
   params: TaskParams
   setParams: (patch: Partial<TaskParams>) => void
   activeProfile: ApiProfile
+  modelValue: string
+  modelCatalog: { models: string[]; loading: boolean; error: string; refresh: () => void }
+  onModelChange: (model: string) => void
+  modelLocked: boolean
+  agentMode?: boolean
+  agentTextModelValue?: string
+  agentTextModelCatalog?: { models: string[]; loading: boolean; error: string; refresh: () => void }
+  onAgentTextModelChange?: (model: string) => void
+  agentTextModelLocked?: boolean
+  agentImageModelValue?: string
+  agentImageModelCatalog?: { models: string[]; loading: boolean; error: string; refresh: () => void }
+  onAgentImageModelChange?: (model: string) => void
+  agentImageModelLocked?: boolean
   isFalProvider: boolean
   isFalTextToImage: boolean
   displaySize: string
@@ -71,8 +96,6 @@ export default function InputParamsPanel({
   outputCompressionInput: string
   setOutputCompressionInput: (value: string) => void
   commitOutputCompression: () => void
-  moderationHint: HintTooltipState
-  moderationDisabled: boolean
   agentAutoImageCount: boolean
   outputImageLimit: number
   nInput: string
@@ -94,6 +117,28 @@ export default function InputParamsPanel({
 }) {
   return (
     <div className={`grid ${cols} gap-2 text-xs flex-1`}>
+      {agentMode ? (
+        <>
+          <ModelPicker
+            value={agentTextModelValue}
+            onChange={(value) => onAgentTextModelChange?.(value)}
+            catalog={agentTextModelCatalog ?? modelCatalog}
+            disabled={agentTextModelLocked}
+            label="对话模型"
+            ariaLabel="选择对话模型"
+          />
+          <ModelPicker
+            value={agentImageModelValue}
+            onChange={(value) => onAgentImageModelChange?.(value)}
+            catalog={agentImageModelCatalog ?? modelCatalog}
+            disabled={agentImageModelLocked}
+            label="生图模型"
+            ariaLabel="选择生图模型"
+          />
+        </>
+      ) : (
+        <ModelPicker value={modelValue} onChange={onModelChange} catalog={modelCatalog} disabled={modelLocked} />
+      )}
       <label
         className="relative flex flex-col gap-0.5"
         onMouseEnter={sizeHint.show}
@@ -199,7 +244,7 @@ export default function InputParamsPanel({
           />
         </label>
       )}
-      {!showTransparentOutputControl && (
+      {!agentMode && !showTransparentOutputControl && (
         <label
           className="relative flex flex-col gap-0.5"
           onMouseEnter={compressionHint.show}
@@ -231,36 +276,6 @@ export default function InputParamsPanel({
           />
         </label>
       )}
-      <label
-        className="relative flex flex-col gap-0.5"
-        onMouseEnter={moderationHint.show}
-        onMouseLeave={moderationHint.hide}
-        onTouchStart={moderationHint.startTouch}
-        onTouchEnd={moderationHint.clearTimer}
-        onTouchCancel={moderationHint.hide}
-        onClick={moderationHint.show}
-      >
-        <span className="text-gray-400 dark:text-gray-500 ml-1">审核</span>
-        <Select
-          value={moderationDisabled ? 'auto' : params.moderation}
-          onChange={(val) => {
-            if (!moderationDisabled) setParams({ moderation: val as TaskParams['moderation'] })
-          }}
-          options={[
-            { label: 'auto', value: 'auto' },
-            { label: 'low', value: 'low' },
-          ]}
-          disabled={moderationDisabled}
-          showValueTooltips={false}
-          className={moderationDisabled
-            ? 'px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] bg-gray-100/50 dark:bg-white/[0.05] opacity-50 cursor-not-allowed text-xs transition-all duration-200 shadow-sm'
-            : selectClass}
-        />
-        <ButtonTooltip
-          visible={moderationDisabled && moderationHint.visible}
-          text="fal.ai 不支持审核参数"
-        />
-      </label>
       <label
         className="relative flex flex-col gap-0.5"
         onMouseEnter={() => { showAgentNHint(); streamConcurrentHint.show() }}
